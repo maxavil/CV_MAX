@@ -164,6 +164,7 @@ tbody tr:hover td.cell.chg{background:var(--chg)}
     </div>
     <label class="grp" style="cursor:pointer"><input type="checkbox" id="chkCambios"> <span style="font-size:12.5px;color:var(--ink-2)">Resaltar cambios</span></label>
     <label class="grp" style="cursor:pointer"><input type="checkbox" id="chkSoloMatch"> <span style="font-size:12.5px;color:var(--ink-2)">Solo con match</span></label>
+    <label class="grp hidden" id="lblMismoAnio" style="cursor:pointer" title="Con varios spoolers cargados, una misma poliza aparece en varios anios; esto se queda con el registro del anio de la celda."><input type="checkbox" id="chkMismoAnio" checked> <span style="font-size:12.5px;color:var(--ink-2)">Emision del mismo anio</span></label>
     <div class="spacer"></div>
     <span class="pill" id="pillConteo"></span>
   </div>
@@ -373,7 +374,8 @@ const ST = {
   anioFin: ANIOS[ANIOS.length - 1],
   buscar: '',
   resaltar: true,
-  soloMatch: false
+  soloMatch: false,
+  mismoAnio: true      /* preferir el registro de emision del anio de la celda */
 };
 
 /* Base de emision cargada en memoria. */
@@ -387,10 +389,16 @@ const EM = {
 /* ============================ cruce ============================ */
 /* Devuelve {recs, via} para un registro del analisis segun el modo de cruce.
    via: 'p' poliza | 'c' clave | 'pc' ambas | '' sin match                  */
-let cacheCruce = new Map();
-function cruzar(reg){
+let cacheCruce = new Map(), cacheCand = new Map();
+/* Columna con el anio del spooler, si la base de emision la trae. */
+const anioSpooler = () => EM.cols.indexOf('ANIO_SPOOLER');
+
+/* Todos los registros de emision que corresponden a este registro del
+   analisis segun el modo de cruce, sin filtrar por anio.
+   via: 'p' poliza | 'c' clave | 'pc' ambas | '' sin match                  */
+function candidatos(reg){
   const k = ST.cruce + ' ' + reg.i;
-  if (cacheCruce.has(k)) return cacheCruce.get(k);
+  if (cacheCand.has(k)) return cacheCand.get(k);
   let out = { recs: [], via: '' };
   if (EM.cargado){
     const cp = vacia(reg.POLIZA12) ? [] : (EM.idxPol.get(reg.POLIZA12) || []);
@@ -400,12 +408,37 @@ function cruzar(reg){
     else if (ST.cruce === 'ambas'){
       const inter = cp.filter(r => cc.includes(r));
       out = { recs: inter, via: inter.length ? 'pc' : '' };
-    } else {                       /* cualquiera: poliza, si no clave */
+    } else {                       /* cualquiera: ambas, luego poliza, luego clave */
       const inter = cp.filter(r => cc.includes(r));
       if (inter.length)   out = { recs: inter, via: 'pc' };
       else if (cp.length) out = { recs: cp, via: 'p' };
       else if (cc.length) out = { recs: cc, via: 'c' };
     }
+  }
+  cacheCand.set(k, out);
+  return out;
+}
+
+/* Lo que de verdad se pinta en la celda. Con 2020-2026 mensuales una misma
+   llave cae en varios spoolers: manda el registro del anio de la celda y, si
+   ese anio no existe en la emision, el del anio mas cercano.               */
+function cruzar(reg){
+  const k = ST.cruce + (ST.mismoAnio ? '+a ' : ' ') + reg.i;
+  if (cacheCruce.has(k)) return cacheCruce.get(k);
+  let out = candidatos(reg);
+  const ja = anioSpooler();
+  if (ST.mismoAnio && ja >= 0 && out.recs.length > 1){
+    const anio = r => Number(r.v[ja]);
+    let elegido = reg.ANIO;
+    if (!out.recs.some(r => anio(r) === reg.ANIO)){
+      let dist = Infinity;
+      for (const r of out.recs){
+        const d = Math.abs(anio(r) - reg.ANIO);
+        if (d < dist || (d === dist && anio(r) > elegido)){ dist = d; elegido = anio(r); }
+      }
+    }
+    const sel = out.recs.filter(r => anio(r) === elegido);
+    if (sel.length) out = { recs: sel, via: out.via, anio: elegido };
   }
   cacheCruce.set(k, out);
   return out;
@@ -545,7 +578,8 @@ function abrirCelda(k, anio){
   const regs = fila.porAnio.get(anio) || [];
   $('#tituloCelda').textContent = k + '  -  ' + anio;
   const bloques = regs.map(r => {
-    const { recs, via } = cruzar(r);
+    const { recs, via } = candidatos(r);      /* aqui si van todos los anios */
+    const usados = cruzar(r).recs;
     const sise = VARS_SISE.map(([id, etq]) =>
       '<tr><td style="color:var(--ink-3);white-space:nowrap">' + esc(etq) + '</td><td>' + esc(r[id]) + '</td></tr>').join('');
     let emi = '';
@@ -554,7 +588,8 @@ function abrirCelda(k, anio){
         emi = '<p class="na" style="margin:8px 0 0">Sin match en la emision con el cruce actual (' + ST.cruce + ').</p>';
       } else {
         emi = recs.map((rec, n) => '<table class="mini"><tbody>' +
-          (recs.length > 1 ? '<tr><td colspan="2" style="font-weight:600">Registro ' + (n + 1) + ' de ' + recs.length + '</td></tr>' : '') +
+          (recs.length > 1 ? '<tr><td colspan="2" style="font-weight:600">Registro ' + (n + 1) + ' de ' + recs.length +
+            (usados.includes(rec) ? ' <span class="pill ok">el de la celda</span>' : '') + '</td></tr>' : '') +
           EM.cols.map((c, j) => rec.v[j] ? '<tr><td style="color:var(--ink-3);white-space:nowrap">' + esc(c) +
             '</td><td>' + esc(rec.v[j]) + '</td></tr>' : '').join('') + '</tbody></table>').join('<hr style="border:0;border-top:1px solid var(--line)">');
       }
@@ -879,6 +914,7 @@ function refrescarVariables(){
     ST.variable = b.dataset.var; sincronizarVar(); render();
   });
 
+  $('#lblMismoAnio').classList.toggle('hidden', anioSpooler() < 0);
   if (ST.variable.startsWith('EM:') && !EM.cols.includes(ST.variable.slice(3))) ST.variable = 'ASEGURADO';
   sincronizarVar();
 }
@@ -1039,8 +1075,9 @@ function init(){
     if (ST.anioIni > ST.anioFin){ ST.anioIni = ST.anioFin; $('#selAnioIni').value = ST.anioIni; } render(); };
   $('#chkCambios').onchange = e => { ST.resaltar = e.target.checked; render(); };
   $('#chkSoloMatch').onchange = e => { ST.soloMatch = e.target.checked; render(); };
+  $('#chkMismoAnio').onchange = e => { ST.mismoAnio = e.target.checked; cacheCruce = new Map(); render(); };
   let t; $('#txtBuscar').oninput = e => { clearTimeout(t); t = setTimeout(() => { ST.buscar = e.target.value; render(); }, 180); };
-  segmento('#segCruce', 'cruce', () => { cacheCruce = new Map(); });
+  segmento('#segCruce', 'cruce', () => { cacheCruce = new Map(); cacheCand = new Map(); });
 
   $('#btnCargar').onclick = () => abrir('#drwCargar');
   $('#btnMatch').onclick = abrirMatch;

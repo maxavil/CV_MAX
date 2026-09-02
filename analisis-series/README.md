@@ -14,6 +14,41 @@ Son dos bases:
 
 ---
 
+## 0. Todo en un solo paso (lo normal)
+
+```
+pip install openpyxl
+python proceso_completo.py
+```
+
+Eso junta los `ASEG_MM_AAAA.txt` de `C:\Spoolers` de 2020 a 2026, los cruza con
+el Excel de Descargas y deja ahí mismo `resumen_series.html` y
+`emision_cruzada.csv`. Sin parquet: de cada spooler se queda solo con los
+registros cuya póliza o clave está en el Excel — unos cuantos cientos — así que
+corre en minutos y no en horas.
+
+Con 84 spoolers la misma póliza reaparece cada mes, así que se colapsa a **un
+registro por póliza + clave + año + inciso**, el del mes más reciente. En el
+HTML la celda de cada año usa el registro de **ese** año (y si ese año no está
+en la emisión, el del año más cercano); la casilla *Emisión del mismo año* lo
+apaga, y el detalle de la celda siempre muestra los registros de todos los años.
+
+Ajustes:
+
+```
+python proceso_completo.py --spoolers "D:\Spoolers" --anios 2020 2026
+python proceso_completo.py --columnas NOMBRE_ASEGURADO CALLE TELEFONO APODERADO_LEGAL
+python proceso_completo.py --todos-los-meses      # guarda cada mes por separado
+```
+
+Necesita `plantilla.html` junto al script; si no la encuentra la baja del
+repositorio.
+
+Los pasos 1 a 3 de abajo son la versión desarmada, por si quieres correr sólo
+una parte.
+
+---
+
 ## 1. Generar el HTML
 
 ```
@@ -132,9 +167,10 @@ Un punto de color en cada celda indica por dónde entró el match
 ## Archivos
 
 ```
-construir_resumen.py   genera el HTML a partir del Excel
+proceso_completo.py    spoolers + Excel -> HTML, todo de una
+construir_resumen.py   genera el HTML solo a partir del Excel
 preparar_emision.py    filtra el parquet o los spoolers a un CSV chico
-plantilla.html         la interfaz; construir_resumen.py le inyecta los datos
+plantilla.html         la interfaz; los scripts le inyectan los datos
 ```
 
 Los datos no se versionan: el `.gitignore` excluye los `.xlsx`, los CSV de
