@@ -1,0 +1,9 @@
+# Datos: llevan nombres, direcciones y telefonos de asegurados. No se versionan.
+*.xlsx
+*.xls
+*.csv
+*.txt
+*.parquet
+resumen_series*.html
+resumen_con_emision.html
+__pycache__/
