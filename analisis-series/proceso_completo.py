@@ -528,7 +528,10 @@ def resumen_cruce(datos, filas):
 
 def obtener_plantilla(ruta_dada=None):
     candidatas = [ruta_dada] if ruta_dada else []
-    aqui = os.path.dirname(os.path.abspath(__file__))
+    # En una celda de Jupyter no existe __file__: se busca desde el directorio
+    # de trabajo del notebook.
+    aqui = (os.path.dirname(os.path.abspath(__file__))
+            if "__file__" in globals() else os.getcwd())
     candidatas += [os.path.join(aqui, "plantilla.html"),
                    os.path.join(aqui, "analisis-series", "plantilla.html"),
                    os.path.join(DESCARGAS, "plantilla.html")]
