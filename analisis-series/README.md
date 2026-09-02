@@ -33,11 +33,30 @@ HTML la celda de cada año usa el registro de **ese** año (y si ese año no est
 en la emisión, el del año más cercano); la casilla *Emisión del mismo año* lo
 apaga, y el detalle de la celda siempre muestra los registros de todos los años.
 
+### Las variables que trae de la emisión
+
+Se toman por nombre del encabezado del spooler, no adivinando. El layout real
+trae `A. PATERNO`, `C.P.`, `NOMBRE (S)`, `GENTE` (el agente) y el apoderado
+escrito `APODERALO LEG`, así que los patrones contemplan esas formas:
+
+| Canónica | Sale de |
+|---|---|
+| `NOMBRE_PERSONA` | **armada**: `A. PATERNO` + `A. MATERNO` + `NOMBRE (S)` |
+| `NOMBRECOMPLETO` | `NOMBRECOMPLETO` |
+| `DIRECCION` | **armada**: `CALLE NUMERO`, `COLONIA`, `DESC ESTADO`, `C.P.` |
+| `TELEFONO`, `CELULAR`, `CORREO` | `TELEFONO`, `CELULAR`, `CORREO` |
+| `APODERADO_LEGAL`, `ADMINISTRADOR`, `DIRECTOR` | `APODERALO LEG`, `ADMINISTRADOR`, `DIRECTOR` |
+| `RFC`, `CURP`, `TP`, `USUARIO_EMI`, `FEC_EMI`, `EMI`, `AGENTE` | las homónimas |
+
+`NOMBRE_PERSONA` y `DIRECCION` no existen en el spooler: las arma el script,
+porque son las que quieres detrás de un botón. Al correr te imprime qué
+variables encontró y cuáles no.
+
 Ajustes:
 
 ```
 python proceso_completo.py --spoolers "D:\Spoolers" --anios 2020 2026
-python proceso_completo.py --columnas NOMBRE_ASEGURADO CALLE TELEFONO APODERADO_LEGAL
+python proceso_completo.py --columnas TELEFONO CORREO DIRECCION APODERADO_LEGAL
 python proceso_completo.py --todos-los-meses      # guarda cada mes por separado
 ```
 
@@ -129,6 +148,12 @@ dígitos con ceros a la izquierda. Los cuatro modos del botón **Cruce**:
 | **Ambas** | el registro de emisión debe coincidir en póliza **y** en clave |
 | **Cualquiera** | intenta ambas, luego póliza, luego clave |
 
+**Cobertura** responde la otra pregunta: de las 296 pólizas, ¿a cuántas les
+llega teléfono? ¿y correo? Una fila por variable con el conteo, el porcentaje y
+una barra, ordenadas de la más completa a la más hueca. Clic en cualquier fila
+y esa variable se pinta en la tabla. Se exporta a CSV, y como se calcula con el
+cruce activo, cambiando de **Póliza** a **Clave** ves cuánto gana cada llave.
+
 **Ver matches** abre el diagnóstico: cuántas pólizas cruzaron por cada llave,
 cuántas por las dos, cuántas por ninguna, y el detalle póliza por póliza con lo
 que se encontró del otro lado. Se exporta a CSV.
@@ -151,8 +176,9 @@ Un punto de color en cada celda indica por dónde entró el match
 ## 4. Lo que se puede hacer en la tabla
 
 - **Pivote**: serie, póliza (18 o 12), clave de asegurado, o serie + clave.
-- **Dato en celda**: los botones rápidos, o el desplegable con las 14 variables
-  del análisis más todas las que hayas traído de la emisión.
+- **Dato en celda**: los botones rápidos (Asegurado, Clasificación, Póliza,
+  Nombre, Dirección, Teléfono, Celular, Correo, Apoderado) o el desplegable con
+  las 14 variables del análisis más las 23 de la emisión.
 - **Años**: el rango arranca en el año más antiguo que aún cubre el 90 % de las
   pólizas (2018 con tu archivo actual), para no abrir con siete columnas vacías;
   se amplía con los selectores.

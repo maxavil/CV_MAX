@@ -63,13 +63,52 @@ PATRONES_INICIO = [
 ]
 NOMBRE_MES = re.compile(r"ASEG_(\d{2})_(\d{4})", re.IGNORECASE)
 
-# Columnas de la emision que se traen si no pides otras.
-PATRONES_COLUMNAS = [
-    re.compile(r"(NOMBRE|RAZON.?SOC)"),
-    re.compile(r"(DIRECC|DOMICIL|CALLE|COLONIA|MUNICIP|ESTADO|CODIGO_?POSTAL|^CP$|_CP$)"),
-    re.compile(r"(TELEF|CELUL|^TEL|_TEL|LADA)"),
-    re.compile(r"(APODER|REPRESENT|LEGAL)"),
-    re.compile(r"(INCISO|AGENTE|OFICINA|FECHA|PRIMA|RFC)"),
+# Las variables que interesan del spooler de emision, con el patron que las
+# reconoce sobre el encabezado ya normalizado (mayusculas, "_" en vez de
+# signos). El orden importa: gana el primero que casa con una columna libre,
+# por eso USUARIO_EMI y FEC_EMI van antes que EMI.
+#
+# Ojo con el layout real: "A. PATERNO" -> A_PATERNO, "C.P." -> C_P,
+# "NOMBRE (S)" -> NOMBRE_S, "GENTE" es la columna del agente, y el apoderado
+# viene escrito "APODERALO LEG" (con la errata de origen).
+VARIABLES_EMISION = [
+    ("TP",              r"^TP$"),
+    ("A_PATERNO",       r"PATERNO"),
+    ("A_MATERNO",       r"MATERNO"),
+    ("NOMBRE_S",        r"^NOMBRE(_S)?$|^NOMBRES$"),
+    ("NOMBRECOMPLETO",  r"NOMBRE_?COMPLETO"),
+    ("CALLE_NUMERO",    r"CALLE|DOMICIL|DIRECC"),
+    ("COLONIA",         r"COLONIA"),
+    ("DESC_ESTADO",     r"ESTADO"),
+    ("CP",              r"^C_?P$|CODIGO_?POSTAL"),
+    ("CORREO",          r"CORREO|EMAIL|^MAIL"),
+    ("CURP",            r"^CURP$"),
+    ("RFC",             r"^RFC$"),
+    ("USUARIO_EMI",     r"USUARIO"),
+    ("APODERADO_LEGAL", r"APODER|REPRESENT"),
+    ("ADMINISTRADOR",   r"ADMINISTRADOR"),
+    ("DIRECTOR",        r"DIRECTOR"),
+    ("FEC_EMI",         r"^FEC_?EMI|FECHA_?EMI"),
+    ("EMI",             r"^EMI$"),
+    ("AGENTE",          r"^A?GENTE$"),
+    ("TELEFONO",        r"TELEF"),
+    ("CELULAR",         r"CELUL"),
+]
+
+# Dos columnas armadas por nosotros, que son las que de verdad quieres ver
+# en un boton: el nombre de la persona y la direccion completa.
+DERIVADAS = {
+    "NOMBRE_PERSONA": ["A_PATERNO", "A_MATERNO", "NOMBRE_S"],
+    "DIRECCION":      ["CALLE_NUMERO", "COLONIA", "DESC_ESTADO", "CP"],
+}
+
+# En que orden salen al CSV y al desplegable del HTML.
+ORDEN_SALIDA = [
+    "NOMBRE_PERSONA", "NOMBRECOMPLETO", "A_PATERNO", "A_MATERNO", "NOMBRE_S",
+    "DIRECCION", "CALLE_NUMERO", "COLONIA", "DESC_ESTADO", "CP",
+    "TELEFONO", "CELULAR", "CORREO",
+    "APODERADO_LEGAL", "ADMINISTRADOR", "DIRECTOR",
+    "RFC", "CURP", "TP", "USUARIO_EMI", "FEC_EMI", "EMI", "AGENTE",
 ]
 
 # Columnas del Excel: nombre interno -> como puede venir escrito.
@@ -296,15 +335,46 @@ def adivinar_llaves(columnas, muestra, pol_ok, cla_ok):
     return jp, jc
 
 
-def elegir_columnas(columnas, pedidas, llaves):
-    disponibles = [c for c in columnas if c not in llaves]
+def mapear_variables(columnas):
+    """{nombre canonico: indice en el spooler}. Cada columna se usa una vez.
+
+    Se mapean TODAS, no solo las pedidas: DIRECCION y NOMBRE_PERSONA se arman
+    con partes (CALLE_NUMERO, COLONIA, ...) que quiza no pediste por nombre.
+    El filtro de lo que sale ocurre despues, en columnas_de_salida.
+    """
+    usados, mapa, faltan = set(), {}, []
+    for nombre, patron in VARIABLES_EMISION:
+        rx = re.compile(patron)
+        for j, c in enumerate(columnas):
+            if j not in usados and rx.search(c):
+                mapa[nombre] = j
+                usados.add(j)
+                break
+        else:
+            faltan.append(nombre)
+    return mapa, faltan
+
+
+def columnas_de_salida(mapa, pedidas=None):
+    """Las canonicas encontradas mas las derivadas que se puedan armar."""
+    disponibles = set(mapa)
+    for der, partes in DERIVADAS.items():
+        if any(p in mapa for p in partes):
+            disponibles.add(der)
+    cols = [c for c in ORDEN_SALIDA if c in disponibles]
     if pedidas:
-        faltan = [c for c in pedidas if c not in disponibles]
-        if faltan:
-            print("  ! no existen en la emision y se ignoran: %s" % ", ".join(faltan))
-        return [c for c in pedidas if c in disponibles]
-    sel = [c for c in disponibles if any(p.search(c) for p in PATRONES_COLUMNAS)]
-    return sel or disponibles
+        cols = [c for c in cols if c in pedidas]
+    return cols
+
+
+def armar_valores(campos, mapa, salida_cols):
+    """Los valores de un registro, ya con NOMBRE_PERSONA y DIRECCION."""
+    v = {n: campos[j] for n, j in mapa.items()}
+    for der, partes in DERIVADAS.items():
+        trozos = [v.get(p, "") for p in partes]
+        trozos = [t for t in trozos if t]
+        v[der] = (" " if der == "NOMBRE_PERSONA" else ", ").join(trozos)
+    return [v.get(c, "") for c in salida_cols]
 
 
 def recorrer_spoolers(carpeta, anios, pol_ok, cla_ok, pedidas, colapsar=True):
@@ -334,8 +404,8 @@ def recorrer_spoolers(carpeta, anios, pol_ok, cla_ok, pedidas, colapsar=True):
     print("  %d archivo(s) entre %d y %d\n" % (len(archivos), anios[0], anios[1]))
 
     columnas = salida_cols = None
-    jp = jc = k_inciso = None
-    jsel = []
+    jp = jc = None
+    mapa_var = {}
     mejores = {}                         # llave -> fila (modo colapsado)
     filas, vistos = [], set()            # modo completo
     leidas = rechazadas = reconstruidas = 0
@@ -345,15 +415,15 @@ def recorrer_spoolers(carpeta, anios, pol_ok, cla_ok, pedidas, colapsar=True):
 
     def fijar_columnas(muestra):
         """Con la primera muestra se deciden las llaves y las variables."""
-        nonlocal jp, jc, salida_cols, jsel, k_inciso
+        nonlocal jp, jc, salida_cols, mapa_var
         jp, jc = adivinar_llaves(columnas, muestra, pol_ok, cla_ok)
-        salida_cols = elegir_columnas(columnas, pedidas, (columnas[jp], columnas[jc]))
-        jsel = [columnas.index(c) for c in salida_cols]
-        k_inciso = next((k for k, c in enumerate(salida_cols) if re.search(r"INCISO", c)), None)
+        mapa_var, faltan = mapear_variables(columnas)
+        salida_cols = columnas_de_salida(mapa_var, pedidas)
         print("  llave poliza: %s | llave clave: %s" % (columnas[jp], columnas[jc]))
-        print("  %d variables exportadas: %s%s\n"
-              % (len(salida_cols), ", ".join(salida_cols[:6]),
-                 ", ..." if len(salida_cols) > 6 else ""))
+        print("  %d variables: %s" % (len(salida_cols), ", ".join(salida_cols)))
+        if faltan:
+            print("  no encontre en el encabezado: %s" % ", ".join(faltan))
+        print()
 
     for anio, mes, ruta in archivos:
         nombre = os.path.basename(ruta)
@@ -366,10 +436,10 @@ def recorrer_spoolers(carpeta, anios, pol_ok, cla_ok, pedidas, colapsar=True):
             p, c = llave_poliza(campos[jp]), llave_clave(campos[jc])
             if (sin_llave(p) or p not in pol_ok) and (sin_llave(c) or c not in cla_ok):
                 return
-            datos = [campos[j] for j in jsel]
+            datos = armar_valores(campos, mapa_var, salida_cols)
             fila = [p, c, str(anio), "%02d" % mes] + datos
             if colapsar:
-                mejores[(p, c, anio, datos[k_inciso] if k_inciso is not None else "")] = fila
+                mejores[(p, c, anio)] = fila     # el ultimo mes del anio manda
             else:
                 firma = (p, c, anio, tuple(datos))
                 if firma not in vistos:
@@ -494,7 +564,7 @@ def main():
     ap.add_argument("--anios", nargs=2, type=int, default=[ANIO_MIN, ANIO_MAX],
                     metavar=("DESDE", "HASTA"))
     ap.add_argument("--columnas", nargs="*", default=None,
-                    help="variables de la emision a traer (por omision, las utiles)")
+                    help="variables a traer, p.ej. TELEFONO CORREO DIRECCION")
     ap.add_argument("--plantilla", default=None)
     ap.add_argument("--todos-los-meses", action="store_true",
                     help="guarda cada mes por separado en vez de uno por anio")

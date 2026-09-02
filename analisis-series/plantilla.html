@@ -153,6 +153,7 @@ tbody tr:hover td.cell.chg{background:var(--chg)}
     <span class="pill" id="pillEmision">Sin emisi&oacute;n cargada</span>
     <button class="btn pri" id="btnCargar">Cargar emisi&oacute;n</button>
     <button class="btn" id="btnMatch">Ver matches</button>
+    <button class="btn" id="btnCobertura">Cobertura</button>
     <button class="btn" id="btnExport">Exportar CSV</button>
     <button class="btn" id="btnTema" title="Claro / oscuro">&#9681;</button>
   </div>
@@ -252,6 +253,20 @@ tbody tr:hover td.cell.chg{background:var(--chg)}
   </div>
 </div>
 
+<!-- ---------- drawer: cobertura por variable ---------- -->
+<div class="drawer" id="drwCobertura">
+  <div class="scrim" data-cerrar></div>
+  <div class="sheet">
+    <div class="sheet-h"><h2>Cobertura por variable</h2><button class="x" data-cerrar>&times;</button></div>
+    <div class="sheet-b" id="cuerpoCobertura"></div>
+    <div class="sheet-f">
+      <button class="btn" data-cerrar>Cerrar</button>
+      <div class="spacer"></div>
+      <button class="btn" id="btnExportCobertura">Exportar CSV</button>
+    </div>
+  </div>
+</div>
+
 <!-- ---------- drawer: detalle de celda ---------- -->
 <div class="drawer" id="drwCelda">
   <div class="scrim" data-cerrar></div>
@@ -340,15 +355,18 @@ const VARS_SISE = [
   ['SERIE',         'Serie (VIN)']
 ];
 /* Botones rapidos. Los que empiezan con @ se resuelven contra las columnas
-   del spooler cuando se carga la emision.                                  */
+   del spooler cuando se carga la emision: se prueba cada patron en orden y
+   gana el primero que exista, por eso NOMBRE_PERSONA le gana a NOMBRE_S.   */
 const RAPIDOS = [
   { id: 'ASEGURADO',     etq: 'Asegurado' },
   { id: 'CLASIFICACION', etq: 'Clasificacion' },
   { id: 'POLIZA',        etq: 'Poliza' },
-  { id: '@NOMBRE',    etq: 'Nombre',          pat: /(NOMBRE|RAZON.?SOC)/ },
-  { id: '@DIRECCION', etq: 'Direccion',       pat: /(DIRECC|DOMICIL|CALLE|COLONIA)/ },
-  { id: '@TELEFONO',  etq: 'Telefono',        pat: /(TELEF|CELUL|^TEL|_TEL)/ },
-  { id: '@APODERADO', etq: 'Apoderado legal', pat: /(APODER|REPRESENT|LEGAL)/ }
+  { id: '@NOMBRE',    etq: 'Nombre',    pats: [/^NOMBRE_PERSONA$/, /^NOMBRECOMPLETO$/, /^NOMBRE_S$/, /NOMBRE|RAZON/] },
+  { id: '@DIRECCION', etq: 'Direccion', pats: [/^DIRECCION$/, /^CALLE_NUMERO$/, /CALLE|DOMICIL|DIRECC/] },
+  { id: '@TELEFONO',  etq: 'Telefono',  pats: [/^TELEFONO$/, /TELEF/, /CELUL/] },
+  { id: '@CELULAR',   etq: 'Celular',   pats: [/^CELULAR$/, /CELUL/] },
+  { id: '@CORREO',    etq: 'Correo',    pats: [/^CORREO$/, /CORREO|EMAIL|MAIL/] },
+  { id: '@APODERADO', etq: 'Apoderado', pats: [/^APODERADO_LEGAL$/, /APODER|REPRESENT/] }
 ];
 
 /* ============================ estado ============================ */
@@ -789,7 +807,8 @@ function pintarPaso2(){
   $('#selColClave').value  = adivinar(LLAVES_CLA, llaveClave, /(CLAVE|ID.?ASEG|ASEGURAD|CLIENTE)/);
 
   const sugeridas = new Set();
-  RAPIDOS.filter(r => r.pat).forEach(r => CABECERA.forEach(c => { if (r.pat.test(c)) sugeridas.add(c); }));
+  RAPIDOS.filter(r => r.pats).forEach(r => r.pats.forEach(pat =>
+    CABECERA.forEach(c => { if (pat.test(c)) sugeridas.add(c); })));
   window.__sel = new Set(sugeridas.size ? sugeridas : CABECERA.slice(0, 12));
   window.__sugeridas = sugeridas;
   pintarChips();
@@ -887,9 +906,12 @@ function barra(cual, p, txt){
    Selector de variables (SISE + emision) y botones rapidos
    ===================================================================== */
 function colParaRapido(r){
-  if (!r.pat) return null;
-  if (!EM.cargado) return null;
-  return EM.cols.find(c => r.pat.test(c)) || null;
+  if (!r.pats || !EM.cargado) return null;
+  for (const pat of r.pats){
+    const c = EM.cols.find(x => pat.test(x));
+    if (c) return c;
+  }
+  return null;
 }
 function refrescarVariables(){
   /* lista completa */
@@ -903,8 +925,8 @@ function refrescarVariables(){
   /* botones rapidos */
   $('#segVar').innerHTML = RAPIDOS.map(r => {
     const c = colParaRapido(r);
-    const val = r.pat ? (c ? 'EM:' + c : '') : r.id;
-    const off = r.pat && !c;
+    const val = r.pats ? (c ? 'EM:' + c : '') : r.id;
+    const off = r.pats && !c;
     return '<button data-var="' + esc(val) + '"' + (off ? ' disabled title="' +
       (EM.cargado ? 'no encontre una columna que aplique en la emision' : 'carga primero la base de emision') + '"' : '') +
       ' aria-pressed="false">' + esc(r.etq) + '</button>';
@@ -1003,6 +1025,76 @@ function reglasHTML(){
 }
 
 /* =====================================================================
+   Cobertura por variable
+   Para cada variable de la emision: a cuantas polizas del analisis les llega
+   dato con el cruce activo. Sirve para preguntarse "de estas 296, para
+   cuantas tengo telefono" y saltar a verla en la tabla de un clic.
+   ===================================================================== */
+const AUXILIARES = /^(ANIO_SPOOLER|MES_SPOOLER)$/;
+
+function cobertura(){
+  const cols = EM.cols.map((c, j) => ({ c, j })).filter(x => !AUXILIARES.test(x.c));
+  const previo = ST.variable;
+  const out = cols.map(({ c, j }) => {
+    let con = 0;
+    for (const r of REGS)
+      if (cruzar(r).recs.some(x => (x.v[j] ?? '') !== '')) con++;
+    return { col: c, con, vacias: REGS.length - con };
+  });
+  ST.variable = previo;
+  return out.sort((a, b) => b.con - a.con || a.col.localeCompare(b.col));
+}
+
+function abrirCobertura(){
+  if (!EM.cargado){
+    $('#cuerpoCobertura').innerHTML =
+      '<div class="note">Primero carga la base de emision. Esta pantalla te dice, ' +
+      'variable por variable, a cuantas polizas del analisis les llega dato.</div>';
+    abrir('#drwCobertura'); return;
+  }
+  const n = REGS.length;
+  const conMatch = REGS.filter(r => cruzar(r).via).length;
+  const datos = cobertura();
+  window.__cobertura = datos;
+
+  const filas = datos.map(d => {
+    const p = n ? d.con / n : 0;
+    const color = p >= .8 ? 'var(--ok)' : p >= .4 ? 'var(--warn)' : 'var(--bad)';
+    return '<tr data-col="' + esc(d.col) + '" style="cursor:pointer">' +
+      '<td style="font-family:var(--mono);font-weight:600">' + esc(d.col) + '</td>' +
+      '<td style="text-align:right;font-variant-numeric:tabular-nums">' + nf(d.con) + '</td>' +
+      '<td style="text-align:right;color:' + color + ';font-weight:600">' + pct(d.con, n) + '</td>' +
+      '<td style="width:180px"><div class="bar" style="margin:0"><i style="width:' +
+        (p * 100).toFixed(1) + '%;background:' + color + '"></i></div></td>' +
+      '<td style="text-align:right;color:var(--ink-3)">' + nf(d.vacias) + '</td>' +
+      '<td><button class="btn" style="padding:2px 9px;font-size:12px">ver</button></td></tr>';
+  }).join('');
+
+  $('#cuerpoCobertura').innerHTML =
+    '<div class="stats">' +
+      '<div class="stat"><b>' + nf(n) + '</b><span>polizas del analisis</span></div>' +
+      '<div class="stat"><b>' + nf(conMatch) + '</b><span>con match (' + pct(conMatch, n) + ')</span></div>' +
+      '<div class="stat"><b>' + nf(n - conMatch) + '</b><span>sin match</span></div>' +
+      '<div class="stat"><b>' + nf(EM.cols.length) + '</b><span>variables traidas</span></div>' +
+    '</div>' +
+    '<div class="note">Cruce activo: <b>' + ST.cruce + '</b>. Cambialo en la barra de arriba y ' +
+    'vuelve a abrir esta pantalla para comparar cuanto gana cada llave. ' +
+    'Clic en cualquier renglon para pintar esa variable en la tabla.</div>' +
+    '<div style="overflow:auto;border:1px solid var(--line);border-radius:10px">' +
+    '<table class="mini"><thead><tr><th>Variable</th><th style="text-align:right">Con dato</th>' +
+    '<th style="text-align:right">%</th><th></th><th style="text-align:right">Sin dato</th><th></th>' +
+    '</tr></thead><tbody>' + filas + '</tbody></table></div>';
+
+  $('#cuerpoCobertura').querySelectorAll('tr[data-col]').forEach(tr => tr.onclick = () => {
+    ST.variable = 'EM:' + tr.dataset.col;
+    sincronizarVar();
+    cerrar('#drwCobertura');
+    render();
+  });
+  abrir('#drwCobertura');
+}
+
+/* =====================================================================
    Exportar
    ===================================================================== */
 function bajar(nombre, texto){
@@ -1029,6 +1121,15 @@ function exportarVista(){
   bajar('resumen_series_' + ST.pivote.toLowerCase() + '_' +
         etqVar.replace(/\W+/g, '_').toLowerCase() + '.csv', lin.join('\r\n'));
 }
+function exportarCobertura(){
+  const n = REGS.length;
+  const d = window.__cobertura || [];
+  const lin = [['Variable', 'Con_dato', 'Porcentaje', 'Sin_dato', 'Total', 'Cruce'].map(cq).join(',')];
+  for (const x of d)
+    lin.push([x.col, x.con, pct(x.con, n), x.vacias, n, ST.cruce].map(cq).join(','));
+  bajar('cobertura_variables.csv', lin.join('\r\n'));
+}
+
 function exportarMatch(){
   const d = EM.cargado ? diagnostico() : REGS.map(r => ({ r, nP: 0, nC: 0, nA: 0, via: '' }));
   const lin = [['Serie', 'Poliza', 'Poliza12', 'Clave', 'Anio', 'Asegurado', 'Match_poliza',
@@ -1081,6 +1182,8 @@ function init(){
 
   $('#btnCargar').onclick = () => abrir('#drwCargar');
   $('#btnMatch').onclick = abrirMatch;
+  $('#btnCobertura').onclick = abrirCobertura;
+  $('#btnExportCobertura').onclick = exportarCobertura;
   $('#btnExport').onclick = exportarVista;
   $('#btnExportMatch').onclick = exportarMatch;
   $('#btnTema').onclick = () => {
