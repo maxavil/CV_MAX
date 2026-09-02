@@ -173,6 +173,32 @@ Un punto de color en cada celda indica por dónde entró el match
 
 ---
 
+## Lista de personas bloqueadas
+
+La columna **Clasificación** del análisis marca al asegurado: `LPB`,
+`Lista Interna` o `No`. Cuenta como bloqueo cualquier valor que no sea `No`,
+por descarte, para que una etiqueta nueva no pase de largo.
+
+En la tabla, una serie cuyo asegurado está en lista lleva **franja roja al pie**
+de cada celda afectada, un **borde rojo y el chip "desde aquí"** en el primer año,
+y bajo la llave dice *en lista desde 2024 (LPB)*. La casilla **Solo bloqueados**
+deja únicamente esas filas. El botón **Bloqueos** abre el resumen por asegurado.
+
+### Lo que ese año significa (y lo que no)
+
+En tu archivo, **la Clasificación no tiene historia**: los 20 asegurados traen la
+misma etiqueta en todas sus filas, de 2005 a 2026. Es el estatus de *hoy*
+estampado hacia atrás, no la fecha en que se dio de alta a alguien en la lista.
+
+Por eso el panel no dice "bloqueado desde": muestra estatus, primera y última
+póliza. Lo que **sí** es real es el cambio de manos: *en lista desde 2024* en una
+serie significa que esa serie pasó ese año a un asegurado que hoy está en lista,
+estando antes con otro que no lo está. En tu archivo son **19 series** y es lo que
+vale la pena mirar. Si consigues la fecha real de alta en lista como columna del
+SISE, se usa esa en lugar del año inferido.
+
+---
+
 ## 4. Lo que se puede hacer en la tabla
 
 - **Pivote**: serie, póliza (18 o 12), clave de asegurado, o serie + clave.
@@ -182,6 +208,10 @@ Un punto de color en cada celda indica por dónde entró el match
 - **Años**: el rango arranca en el año más antiguo que aún cubre el 90 % de las
   pólizas (2018 con tu archivo actual), para no abrir con siete columnas vacías;
   se amplía con los selectores.
+- **Ancho**: *Ajustar* reparte el ancho de la pantalla entre los años que haya —
+  los 22 años de 2005 a 2026 caben sin scroll horizontal, con el valor completo
+  en el tooltip y en el detalle. *Compacto* y *Completo* fijan el ancho si
+  prefieres leer y desplazarte.
 - **Resaltar cambios**: pinta la celda cuando el valor cambió respecto al año
   anterior de esa misma fila — que es justo cómo se ve el movimiento.
 - **Solo con match**, buscador, y **Exportar CSV** de lo que estés viendo.

@@ -59,6 +59,7 @@ select,.inp{background:var(--panel);border:1px solid var(--line);border-radius:8
 .wrap{padding:14px 16px 60px}
 .tablebox{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:auto;max-height:calc(100vh - 190px);position:relative}
 table{border-collapse:separate;border-spacing:0;width:max-content;min-width:100%}
+table.fija{table-layout:fixed;width:100%}
 th,td{border-bottom:1px solid var(--line-2);border-right:1px solid var(--line-2);padding:7px 10px;text-align:left;vertical-align:top}
 thead th{position:sticky;top:0;z-index:20;background:var(--panel);border-bottom:1px solid var(--line);font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-3);white-space:nowrap}
 thead th.yr{text-align:center}
@@ -68,10 +69,30 @@ thead th.kcol{z-index:30}
 tbody tr:hover td{background:var(--line-2)}
 tbody tr:hover td.kcol{background:var(--line-2)}
 .k{font-family:var(--mono);font-size:12.5px;font-weight:600;letter-spacing:.02em}
-.ksub{font-size:11px;color:var(--ink-3);margin-top:2px}
-td.cell{min-width:120px;max-width:196px;font-size:12.5px}
+.ksub{font-size:11px;color:var(--ink-3);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+td.cell{min-width:120px;max-width:196px;font-size:12.5px;overflow:hidden}
+/* Con las columnas angostas el texto se recorta en una linea; el valor
+   completo queda en el title y en el detalle de la celda.                  */
+table.angosta td.cell .val{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+table.fija td.cell{min-width:0;max-width:none}
+table.fija td.kcol,table.fija th.kcol{min-width:0}
+/* Modo micro: solo se ve el patron de anios, el dato va en el title. */
+table.micro td.cell{padding:7px 4px;text-align:center}
+table.micro td.cell .val{font-size:11px}
+table.micro td.cell .more,table.micro thead th.yr .cnt{display:none}
+table.micro thead th.yr{font-size:10px;padding:7px 2px}
 td.cell.empty{min-width:40px;background:repeating-linear-gradient(45deg,transparent,transparent 5px,var(--line-2) 5px,var(--line-2) 6px)}
 td.cell.chg{background:var(--chg);box-shadow:inset 2px 0 0 var(--chg-line)}
+/* Bloqueo: franja roja abajo mientras la poliza este en lista, y una marca
+   solida el anio en que entro.                                             */
+td.cell.bloq{background-image:linear-gradient(to top,var(--bad) 0 3px,transparent 3px)}
+td.cell.bloq-ini{box-shadow:inset 3px 0 0 var(--bad)}
+.marca-bloq{display:inline-block;font-size:9px;font-weight:700;letter-spacing:.04em;
+  padding:1px 5px;border-radius:3px;background:var(--bad);color:#fff;margin-right:5px;vertical-align:1px}
+.ksub .desde{color:var(--bad);font-weight:600}
+/* En columnas angostas la franja roja y el borde ya dicen lo mismo que el
+   chip, que ahi solo estorba.                                              */
+table.angosta .marca-bloq{display:none}
 tbody tr:hover td.cell.chg{background:var(--chg)}
 .val{overflow-wrap:anywhere}
 .val.mono{font-family:var(--mono);font-size:12px}
@@ -154,6 +175,7 @@ tbody tr:hover td.cell.chg{background:var(--chg)}
     <button class="btn pri" id="btnCargar">Cargar emisi&oacute;n</button>
     <button class="btn" id="btnMatch">Ver matches</button>
     <button class="btn" id="btnCobertura">Cobertura</button>
+    <button class="btn" id="btnBloqueos">Bloqueos</button>
     <button class="btn" id="btnExport">Exportar CSV</button>
     <button class="btn" id="btnTema" title="Claro / oscuro">&#9681;</button>
   </div>
@@ -165,6 +187,16 @@ tbody tr:hover td.cell.chg{background:var(--chg)}
     </div>
     <label class="grp" style="cursor:pointer"><input type="checkbox" id="chkCambios"> <span style="font-size:12.5px;color:var(--ink-2)">Resaltar cambios</span></label>
     <label class="grp" style="cursor:pointer"><input type="checkbox" id="chkSoloMatch"> <span style="font-size:12.5px;color:var(--ink-2)">Solo con match</span></label>
+    <div class="grp">
+      <label>Ancho</label>
+      <div class="seg" id="segDensidad">
+        <button data-densidad="ajustar" aria-pressed="true" title="las columnas se reparten el ancho de la pantalla">Ajustar</button>
+        <button data-densidad="compacto" aria-pressed="false">Compacto</button>
+        <button data-densidad="completo" aria-pressed="false">Completo</button>
+      </div>
+    </div>
+    <label class="grp" style="cursor:pointer" title="Marca desde que anio la poliza aparece en lista de bloqueados"><input type="checkbox" id="chkBloqueo" checked> <span style="font-size:12.5px;color:var(--ink-2)">Marcar bloqueo</span></label>
+    <label class="grp" style="cursor:pointer"><input type="checkbox" id="chkSoloBloq"> <span style="font-size:12.5px;color:var(--ink-2)">Solo bloqueados</span></label>
     <label class="grp hidden" id="lblMismoAnio" style="cursor:pointer" title="Con varios spoolers cargados, una misma poliza aparece en varios anios; esto se queda con el registro del anio de la celda."><input type="checkbox" id="chkMismoAnio" checked> <span style="font-size:12.5px;color:var(--ink-2)">Emision del mismo anio</span></label>
     <div class="spacer"></div>
     <span class="pill" id="pillConteo"></span>
@@ -249,6 +281,20 @@ tbody tr:hover td.cell.chg{background:var(--chg)}
       <button class="btn" data-cerrar>Cerrar</button>
       <div class="spacer"></div>
       <button class="btn" id="btnExportMatch">Exportar diagn&oacute;stico CSV</button>
+    </div>
+  </div>
+</div>
+
+<!-- ---------- drawer: bloqueos ---------- -->
+<div class="drawer" id="drwBloqueos">
+  <div class="scrim" data-cerrar></div>
+  <div class="sheet">
+    <div class="sheet-h"><h2>Asegurados en lista</h2><button class="x" data-cerrar>&times;</button></div>
+    <div class="sheet-b" id="cuerpoBloqueos"></div>
+    <div class="sheet-f">
+      <button class="btn" data-cerrar>Cerrar</button>
+      <div class="spacer"></div>
+      <button class="btn" id="btnExportBloqueos">Exportar CSV</button>
     </div>
   </div>
 </div>
@@ -393,6 +439,9 @@ const ST = {
   buscar: '',
   resaltar: true,
   soloMatch: false,
+  densidad: 'ajustar',   /* ajustar | compacto | completo */
+  bloqueo: true,         /* pintar la marca de lista de bloqueados */
+  soloBloq: false,
   mismoAnio: true      /* preferir el registro de emision del anio de la celda */
 };
 
@@ -475,6 +524,24 @@ function valorDe(reg){
   return { txt: reg[v] ?? '', via: EM.cargado ? cruzar(reg).via : '', sinMatch: false, n: 1 };
 }
 
+/* ====================== lista de bloqueados ======================
+   La columna Clasificacion del analisis dice si el asegurado esta en lista:
+   "LPB", "Lista Interna", etc. bloquean; "No" (y los vacios) no. Se toma por
+   descarte para que cualquier etiqueta nueva cuente como bloqueo en vez de
+   pasar desapercibida.                                                      */
+const NO_BLOQUEA = /^(NO|N\/A|NA|-|SIN|NINGUNA|0)?$/i;
+const bloquea = c => !NO_BLOQUEA.test(String(c || '').trim());
+
+/* Primer anio en que una lista de registros aparece bloqueada. */
+function desdeCuandoBloqueado(regs){
+  let anio = null, etq = '';
+  for (const r of regs){
+    if (!bloquea(r.CLASIFICACION)) continue;
+    if (anio === null || r.ANIO < anio){ anio = r.ANIO; etq = r.CLASIFICACION; }
+  }
+  return { anio, etq };
+}
+
 /* ============================ pivote ============================ */
 const PIVOTES = {
   SERIE:       { etq: 'Serie',           llave: r => r.SERIE,   sub: g => resumenSub(g, 'ASEGURADO') },
@@ -516,11 +583,23 @@ function construirPivote(){
   if (q) filas = filas.filter(fila => fila.texto.includes(q));
   if (ST.soloMatch && EM.cargado)
     filas = filas.filter(fila => fila.g.some(r => cruzar(r).via));
+  if (ST.soloBloq)
+    filas = filas.filter(fila => fila.g.some(r => bloquea(r.CLASIFICACION)));
   filas.sort((a, b) => a.k.localeCompare(b.k, 'es'));
   return filas;
 }
 
 /* ============================ render ============================ */
+/* Ancho de cada columna de anio. En "ajustar" se reparte el ancho visible
+   entre los anios que haya, para no tener que irse de lado con el scroll.  */
+const ANCHO_LLAVE = 210;
+function anchoColumna(nAnios){
+  if (ST.densidad === 'completo') return 190;
+  if (ST.densidad === 'compacto') return 100;
+  const caja = $('#cajaTabla').clientWidth || 1200;
+  const libre = caja - ANCHO_LLAVE - 4;
+  return Math.max(38, Math.min(190, Math.floor(libre / Math.max(1, nAnios)) - 1));
+}
 const DOT = { p: 'p', c: 'c', pc: 'pc' };
 let ULTIMAS_FILAS = [];
 let ULTIMOS_ANIOS = [];
@@ -540,11 +619,18 @@ function render(){
     return;
   }
 
-  const th = ['<th class="kcol">' + esc(PIVOTES[ST.pivote].etq) + '</th>'];
+  const cw = anchoColumna(anios.length);
+  const micro = cw < 58;                       /* solo cabe la marca */
+  const clases = 'fija' + (cw < 130 ? ' angosta' : '') + (micro ? ' micro' : '');
+
+  const th = ['<th class="kcol" style="width:' + ANCHO_LLAVE + 'px">' +
+              esc(PIVOTES[ST.pivote].etq) + '</th>'];
   anios.forEach((a, i) => th.push(
-    '<th class="yr">' + a + '<span class="cnt">' + conteo[i] + '</span></th>'));
+    '<th class="yr" style="width:' + cw + 'px">' + (micro ? "'" + String(a).slice(2) : a) +
+    '<span class="cnt">' + conteo[i] + '</span></th>'));
 
   const cuerpo = filas.map(fila => {
+    const bloq = desdeCuandoBloqueado(fila.g);
     let previo = null;
     const tds = anios.map(a => {
       const regs = fila.porAnio.get(a);
@@ -561,27 +647,48 @@ function render(){
       const cambio = ST.resaltar && previo !== null && principal !== '' && principal !== previo;
       if (principal !== '') previo = principal;
 
+      const enLista = ST.bloqueo && regs.some(r => bloquea(r.CLASIFICACION));
+      const inicia  = enLista && bloq.anio === a;
+
       let inner;
-      if (vistos.length === 0)
+      if (micro){
+        inner = '<span class="val">' + (vistos.length ? '&#9679;' : '&#9702;') + '</span>';
+      } else if (!vistos.length){
         inner = '<span class="na">' + (sinMatch ? 'sin match' : 'sin dato') + '</span>';
-      else {
+      } else {
         const mono = /^(POLIZA|POLIZA12|CLAVE|INCISO|ID_AGENTE|OFICINA_ID|SERIE)$/.test(ST.variable);
-        inner = '<span class="val' + (mono ? ' mono' : '') + '">' + esc(principal) + '</span>';
+        inner = (inicia ? '<span class="marca-bloq">desde aqui</span>' : '') +
+                '<span class="val' + (mono ? ' mono' : '') + '">' + esc(principal) + '</span>';
       }
-      const badge = regs.length > 1
+      const badge = (!micro && regs.length > 1)
         ? '<span class="more" title="' + regs.length + ' polizas emitidas en este anio">+' + (regs.length - 1) + '</span>' : '';
       const punto = (EM.cargado && ST.variable.startsWith('EM:'))
         ? '<span class="dot ' + (via ? DOT[via] : 'x') + '"></span>' : '';
-      return '<td class="cell' + (cambio ? ' chg' : '') + '" data-k="' + esc(fila.k) +
-             '" data-a="' + a + '" title="clic para ver el detalle">' + punto + inner + badge + '</td>';
+
+      const cls = ['cell'];
+      if (cambio) cls.push('chg');
+      if (enLista) cls.push('bloq');
+      if (inicia) cls.push('bloq-ini');
+      const tip = (principal || (sinMatch ? 'sin match' : 'sin dato')) +
+                  (inicia ? '  |  desde ' + a + ' esta a nombre de un asegurado en lista (' +
+                            bloq.etq + ')' : '') +
+                  (regs.length > 1 ? '  |  ' + regs.length + ' polizas' : '') +
+                  '  |  clic para el detalle';
+      return '<td class="' + cls.join(' ') + '" data-k="' + esc(fila.k) +
+             '" data-a="' + a + '" title="' + esc(tip) + '">' + punto + inner + badge + '</td>';
     }).join('');
 
+    const nombre = PIVOTES[ST.pivote].sub(fila.g);
+    const sub = '<div class="ksub" title="' + esc(nombre) + '">' + esc(nombre) + '</div>' +
+      (bloq.anio ? '<div class="ksub"><span class="desde">en lista desde ' + bloq.anio +
+                   ' (' + esc(bloq.etq) + ')</span></div>' : '');
     return '<tr><td class="kcol"><div class="k">' + esc(fila.k) + '</div>' +
-           '<div class="ksub">' + esc(PIVOTES[ST.pivote].sub(fila.g)) + '</div></td>' + tds + '</tr>';
+           sub + '</td>' + tds + '</tr>';
   }).join('');
 
   $('#cajaTabla').innerHTML =
-    '<table><thead><tr>' + th.join('') + '</tr></thead><tbody>' + cuerpo + '</tbody></table>';
+    '<table class="' + clases + '"><thead><tr>' + th.join('') +
+    '</tr></thead><tbody>' + cuerpo + '</tbody></table>';
 
   $('#cajaTabla').querySelectorAll('td.cell').forEach(td => {
     if (!td.classList.contains('empty'))
@@ -1025,6 +1132,113 @@ function reglasHTML(){
 }
 
 /* =====================================================================
+   Bloqueos: desde que anio cada asegurado esta en lista, y cuantas polizas
+   se le emitieron a partir de entonces, que es la pregunta incomoda.
+   ===================================================================== */
+function listaBloqueos(){
+  const grupos = new Map();
+  for (const r of REGS){
+    /* la clave 0000000000 es comodin: ahi se agrupa tambien por nombre */
+    const k = vacia(r.CLAVE) ? r.CLAVE + ' | ' + r.ASEGURADO : r.CLAVE;
+    if (!grupos.has(k)) grupos.set(k, []);
+    grupos.get(k).push(r);
+  }
+  return [...grupos.values()].map(regs => {
+    const b = desdeCuandoBloqueado(regs);
+    const reciente = regs.reduce((a, x) => (x.ANIO >= a.ANIO ? x : a));
+    const anios = [...new Set(regs.map(r => r.ANIO))].sort((x, y) => x - y);
+    return {
+      clave: regs[0].CLAVE,
+      nombre: reciente.ASEGURADO,
+      desde: b.anio, etq: b.etq || '',
+      series: new Set(regs.map(r => r.SERIE)).size,
+      antes:   b.anio ? regs.filter(r => r.ANIO <  b.anio).length : regs.length,
+      despues: b.anio ? regs.filter(r => r.ANIO >= b.anio).length : 0,
+      total: regs.length,
+      primero: anios[0], ultimo: anios[anios.length - 1]
+    };
+  }).sort((a, b) => (a.desde || 9999) - (b.desde || 9999) ||
+                    b.despues - a.despues || a.nombre.localeCompare(b.nombre, 'es'));
+}
+
+function abrirBloqueos(){
+  const d = listaBloqueos();
+  window.__bloqueos = d;
+  const conB = d.filter(x => x.desde);
+  const polizas = conB.reduce((s, x) => s + x.total, 0);
+
+  /* Lo que de verdad se mueve: series que empezaron con alguien fuera de
+     lista y despues quedaron a nombre de alguien en lista.                 */
+  const porSerie = new Map();
+  for (const r of REGS){
+    if (!porSerie.has(r.SERIE)) porSerie.set(r.SERIE, []);
+    porSerie.get(r.SERIE).push(r);
+  }
+  let cambiaron = 0;
+  for (const regs of porSerie.values()){
+    const b = desdeCuandoBloqueado(regs);
+    if (b.anio && regs.some(r => r.ANIO < b.anio)) cambiaron++;
+  }
+
+  const filas = d.map(x => {
+    const est = x.desde
+      ? '<span class="pill bad">' + esc(x.etq) + '</span>'
+      : '<span class="pill">No</span>';
+    return '<tr data-clave="' + esc(x.clave) + '" style="cursor:pointer">' +
+      '<td>' + esc(x.nombre) + '</td>' +
+      '<td style="font-family:var(--mono)">' + esc(x.clave) + '</td>' +
+      '<td>' + est + '</td>' +
+      '<td style="text-align:right">' + x.series + '</td>' +
+      '<td style="text-align:right;font-weight:' + (x.desde ? '700' : '400') +
+        ';color:' + (x.desde ? 'var(--bad)' : 'var(--ink-3)') + '">' + x.total + '</td>' +
+      '<td style="text-align:right">' + x.primero + '</td>' +
+      '<td style="text-align:right">' + x.ultimo + '</td></tr>';
+  }).join('');
+
+  $('#cuerpoBloqueos').innerHTML =
+    '<div class="stats">' +
+      '<div class="stat"><b>' + nf(d.length) + '</b><span>asegurados</span></div>' +
+      '<div class="stat"><b>' + nf(conB.length) + '</b><span>hoy en lista (' + pct(conB.length, d.length) + ')</span></div>' +
+      '<div class="stat"><b>' + nf(polizas) + '</b><span>polizas a su nombre</span></div>' +
+      '<div class="stat"><b>' + nf(cambiaron) + '</b><span>series que pasaron a lista</span></div>' +
+    '</div>' +
+    '<div class="note"><b>Lee esto antes de usar el ano.</b> En este Excel la ' +
+    '<b>Clasificacion no tiene historia</b>: los 20 asegurados traen la misma etiqueta en ' +
+    'todas sus filas, de 2005 a 2026. Es el estatus de <u>hoy</u> estampado hacia atras, no ' +
+    'la fecha en que se bloqueo a alguien. Por eso aqui no se dice "bloqueado desde": la ' +
+    'columna de anios es la primera y ultima poliza del asegurado.<br><br>' +
+    'Lo que si es real es el <b>cambio de manos</b>: en la tabla, "en lista desde 2024" en una ' +
+    'serie significa que <u>esa serie</u> paso ese ano a un asegurado que hoy esta en lista ' +
+    '(antes estaba con otro que no lo esta). Esas son las ' + nf(cambiaron) + ' series de arriba, ' +
+    'y son las que vale la pena mirar. Si quieres la fecha real de alta en lista, tiene que ' +
+    'venir como columna del SISE; en cuanto la traigas, se usa esa.<br><br>' +
+    'Clic en un renglon para dejar solo a ese asegurado en la tabla.</div>' +
+    '<div style="overflow:auto;border:1px solid var(--line);border-radius:10px;max-height:52vh">' +
+    '<table class="mini"><thead><tr><th>Asegurado</th><th>Clave</th><th>Estatus</th>' +
+    '<th style="text-align:right">Series</th><th style="text-align:right">Polizas</th>' +
+    '<th style="text-align:right">Primera</th><th style="text-align:right">Ultima</th>' +
+    '</tr></thead><tbody>' + filas + '</tbody></table></div>';
+
+  $('#cuerpoBloqueos').querySelectorAll('tr[data-clave]').forEach(tr => tr.onclick = () => {
+    $('#txtBuscar').value = tr.dataset.clave;
+    ST.buscar = tr.dataset.clave;
+    cerrar('#drwBloqueos');
+    render();
+  });
+  abrir('#drwBloqueos');
+}
+
+function exportarBloqueos(){
+  const d = window.__bloqueos || listaBloqueos();
+  const lin = [['Asegurado', 'Clave', 'Estatus', 'En_lista', 'Series', 'Polizas',
+                'Primer_anio', 'Ultimo_anio'].map(cq).join(',')];
+  for (const x of d)
+    lin.push([x.nombre, x.clave, x.etq || 'No', x.desde ? 'si' : 'no',
+              x.series, x.total, x.primero, x.ultimo].map(cq).join(','));
+  bajar('bloqueos_por_asegurado.csv', lin.join('\r\n'));
+}
+
+/* =====================================================================
    Cobertura por variable
    Para cada variable de la emision: a cuantas polizas del analisis les llega
    dato con el cruce activo. Sirve para preguntarse "de estas 296, para
@@ -1167,6 +1381,7 @@ function init(){
   $('#selAnioFin').innerHTML = ANIOS.map(opt).join('');
   $('#selAnioIni').value = ST.anioIni; $('#selAnioFin').value = ST.anioFin;
   $('#chkCambios').checked = ST.resaltar;
+  $('#chkBloqueo').checked = ST.bloqueo;
 
   $('#selPivote').onchange = e => { ST.pivote = e.target.value; render(); };
   $('#selVar').onchange = e => { ST.variable = e.target.value; sincronizarVar(); render(); };
@@ -1176,6 +1391,14 @@ function init(){
     if (ST.anioIni > ST.anioFin){ ST.anioIni = ST.anioFin; $('#selAnioIni').value = ST.anioIni; } render(); };
   $('#chkCambios').onchange = e => { ST.resaltar = e.target.checked; render(); };
   $('#chkSoloMatch').onchange = e => { ST.soloMatch = e.target.checked; render(); };
+  $('#chkBloqueo').onchange = e => { ST.bloqueo = e.target.checked; render(); };
+  $('#chkSoloBloq').onchange = e => { ST.soloBloq = e.target.checked; render(); };
+  segmento('#segDensidad', 'densidad');
+  /* en modo "ajustar" el ancho depende de la ventana */
+  let rt; addEventListener('resize', () => {
+    if (ST.densidad !== 'ajustar') return;
+    clearTimeout(rt); rt = setTimeout(render, 150);
+  });
   $('#chkMismoAnio').onchange = e => { ST.mismoAnio = e.target.checked; cacheCruce = new Map(); render(); };
   let t; $('#txtBuscar').oninput = e => { clearTimeout(t); t = setTimeout(() => { ST.buscar = e.target.value; render(); }, 180); };
   segmento('#segCruce', 'cruce', () => { cacheCruce = new Map(); cacheCand = new Map(); });
@@ -1183,6 +1406,8 @@ function init(){
   $('#btnCargar').onclick = () => abrir('#drwCargar');
   $('#btnMatch').onclick = abrirMatch;
   $('#btnCobertura').onclick = abrirCobertura;
+  $('#btnBloqueos').onclick = abrirBloqueos;
+  $('#btnExportBloqueos').onclick = exportarBloqueos;
   $('#btnExportCobertura').onclick = exportarCobertura;
   $('#btnExport').onclick = exportarVista;
   $('#btnExportMatch').onclick = exportarMatch;
