@@ -15,10 +15,15 @@ No arma el parquet ni consolida los 84 archivos completos: de cada spooler
 se queda SOLO con los registros cuya poliza o clave aparece en el Excel,
 que son unos cuantos cientos. Por eso corre en minutos y no en horas.
 
-USO:
+USO (terminal):
     python proceso_completo.py
     python proceso_completo.py --spoolers "D:\\Spoolers" --anios 2020 2026
     python proceso_completo.py --columnas NOMBRE_ASEGURADO CALLE TELEFONO
+
+USO (Jupyter): pega el bloque en una celda y en otra celda corre
+    main()
+Para cambiar algo, pasale los mismos argumentos por sys.argv antes:
+    import sys; sys.argv = ["x", "--spoolers", r"D:\Spoolers"]; main()
 """
 
 import os
@@ -493,7 +498,10 @@ def main():
     ap.add_argument("--plantilla", default=None)
     ap.add_argument("--todos-los-meses", action="store_true",
                     help="guarda cada mes por separado en vez de uno por anio")
-    args = ap.parse_args()
+    # parse_known_args y no parse_args: en Jupyter el kernel mete su propio
+    # "-f kernel-xxxx.json" en sys.argv y argparse aborta con "unrecognized
+    # arguments". Asi el bloque corre igual en notebook que en la terminal.
+    args, _ = ap.parse_known_args()
 
     base = DESCARGAS if os.path.isdir(DESCARGAS) else os.getcwd()
     excel = args.excel
