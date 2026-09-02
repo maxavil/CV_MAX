@@ -136,7 +136,7 @@ python preparar_emision.py --columnas NOMBRE_ASEGURADO DIRECCION TELEFONO APODER
 
 ## 3. Cómo se cruzan las bases
 
-El análisis trae la póliza con **18 dígitos** (`049510003960000000`) y el spooler
+El análisis trae la póliza con **18 dígitos** (`NNNNNNNNNNNN000000`) y el spooler
 abre cada registro con **12** (el `^\d{12}\|` de `consolidar_aseg.py`), así que
 la llave son **los primeros 12**. La clave de asegurado se normaliza a 10
 dígitos con ceros a la izquierda. Los cuatro modos del botón **Cruce**:
@@ -148,8 +148,8 @@ dígitos con ceros a la izquierda. Los cuatro modos del botón **Cruce**:
 | **Ambas** | el registro de emisión debe coincidir en póliza **y** en clave |
 | **Cualquiera** | intenta ambas, luego póliza, luego clave |
 
-**Cobertura** responde la otra pregunta: de las 296 pólizas, ¿a cuántas les
-llega teléfono? ¿y correo? Una fila por variable con el conteo, el porcentaje y
+**Cobertura** responde la otra pregunta: de las pólizas del análisis, ¿a cuántas
+les llega teléfono? ¿y correo? Una fila por variable con el conteo, el porcentaje y
 una barra, ordenadas de la más completa a la más hueca. Clic en cualquier fila
 y esa variable se pinta en la tabla. Se exporta a CSV, y como se calcula con el
 cruce activo, cambiando de **Póliza** a **Clave** ves cuánto gana cada llave.
@@ -163,13 +163,13 @@ Un punto de color en cada celda indica por dónde entró el match
 
 ### Dos cosas que conviene tener presentes
 
-- **Colisión de los 12 dígitos.** En tu propio archivo hay casos como
-  `040800115143326775` y `040800115143000000`: distintos en 18 dígitos, iguales
-  en 12. Ambos apuntan al mismo registro de emisión. Es inevitable si el spooler
-  solo guarda 12; el panel de matches lo deja ver.
-- **Varias pólizas por serie y año.** Hay 60 combinaciones serie+año con más de
-  un registro (la serie `1FUJGLBG7DSFA0881` tiene 4 en 2022). La celda muestra
-  el primer valor y una insignia `+n`; haz clic para ver todos.
+- **Colisión de los 12 dígitos.** Dos pólizas pueden diferir en los 18 dígitos y
+  ser idénticas en los 12 (cuando cambian sólo los últimos seis). Ambas apuntan
+  entonces al mismo registro de emisión. Es inevitable si el spooler sólo guarda
+  12; el panel de matches lo deja ver caso por caso.
+- **Varias pólizas por serie y año.** Una misma serie puede tener varias pólizas
+  emitidas en el mismo año. La celda muestra el primer valor y una insignia
+  `+n`; haz clic para ver todos.
 
 ---
 
@@ -186,16 +186,17 @@ deja únicamente esas filas. El botón **Bloqueos** abre el resumen por asegurad
 
 ### Lo que ese año significa (y lo que no)
 
-En tu archivo, **la Clasificación no tiene historia**: los 20 asegurados traen la
-misma etiqueta en todas sus filas, de 2005 a 2026. Es el estatus de *hoy*
-estampado hacia atrás, no la fecha en que se dio de alta a alguien en la lista.
+Conviene revisarlo en tu archivo: si **la Clasificación no tiene historia** —cada
+asegurado con la misma etiqueta en todas sus filas— entonces es el estatus de
+*hoy* estampado hacia atrás, no la fecha en que se dio de alta a alguien en la
+lista. El panel te lo dice al abrirlo.
 
 Por eso el panel no dice "bloqueado desde": muestra estatus, primera y última
 póliza. Lo que **sí** es real es el cambio de manos: *en lista desde 2024* en una
 serie significa que esa serie pasó ese año a un asegurado que hoy está en lista,
-estando antes con otro que no lo está. En tu archivo son **19 series** y es lo que
-vale la pena mirar. Si consigues la fecha real de alta en lista como columna del
-SISE, se usa esa en lugar del año inferido.
+estando antes con otro que no lo está. Eso es lo que vale la pena mirar. Si
+consigues la fecha real de alta en lista como columna del SISE, se usa esa en
+lugar del año inferido.
 
 ---
 
@@ -206,7 +207,7 @@ SISE, se usa esa en lugar del año inferido.
   Nombre, Dirección, Teléfono, Celular, Correo, Apoderado) o el desplegable con
   las 14 variables del análisis más las 23 de la emisión.
 - **Años**: el rango arranca en el año más antiguo que aún cubre el 90 % de las
-  pólizas (2018 con tu archivo actual), para no abrir con siete columnas vacías;
+  pólizas, para no abrir con columnas vacías;
   se amplía con los selectores.
 - **Ancho**: *Ajustar* reparte el ancho de la pantalla entre los años que haya —
   los 22 años de 2005 a 2026 caben sin scroll horizontal, con el valor completo
