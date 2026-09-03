@@ -1,0 +1,1023 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Reservas Técnicas QES</title>
+<meta name="description" content="Comparativo de reservas técnicas QES entre Metodología local (balanza contable) y Método Estatutario CNSF, con histórico acumulado por periodo." />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo+Narrow:wght@600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+:root{
+  --plum:#5B1A44; --plum-deep:#451234; --plum-soft:#7A2A5E;
+  --teal:#134E63; --teal-2:#1B6C86; --teal-soft:#3E8AA6;
+  --ice:#E9F1F6; --ice-2:#F5F9FB; --paper:#FFFFFF; --ground:#EFF3F6;
+  --ink:#16252D; --ink-2:#4E6069; --ink-3:#7B8C95;
+  --line:#C9D8E1; --line-soft:#E1EAF0;
+  --pos:#0E7C66; --neg:#B04234; --warn:#9C6A0E; --warn-bg:#FDF4E1;
+  --shadow:0 1px 2px rgba(19,78,99,.08), 0 8px 24px rgba(19,78,99,.06);
+  --sans:"IBM Plex Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  --display:"Archivo Narrow","Arial Narrow",var(--sans);
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1260px;margin:0 auto;padding:28px 20px 72px;display:flex;flex-direction:column;gap:22px}
+h1,h2,h3,h4{margin:0;font-family:var(--display);letter-spacing:.01em;text-wrap:balance}
+p{margin:0}
+button{font:inherit;cursor:pointer}
+:focus-visible{outline:2px solid var(--teal-2);outline-offset:2px;border-radius:3px}
+
+/* ---------- cabecera de la app ---------- */
+.app-head{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:16px}
+.app-head h1{font-size:26px;font-weight:700;color:var(--plum);text-transform:uppercase;line-height:1.05}
+.app-head .sub{color:var(--ink-2);font-size:14px;margin-top:2px}
+.stamp{font-family:var(--mono);font-size:11.5px;color:var(--ink-3);letter-spacing:.04em;text-transform:uppercase}
+
+/* ---------- carga ---------- */
+.intake{background:var(--paper);border:1px solid var(--line);border-radius:6px;box-shadow:var(--shadow);display:grid;grid-template-columns:minmax(280px,1fr) minmax(300px,1.15fr);gap:0}
+@media (max-width:860px){.intake{grid-template-columns:1fr}}
+.drop{padding:20px;display:flex;flex-direction:column;gap:12px;border-right:1px solid var(--line-soft)}
+@media (max-width:860px){.drop{border-right:0;border-bottom:1px solid var(--line-soft)}}
+.drop-zone{border:1.5px dashed var(--line);border-radius:5px;background:var(--ice-2);padding:18px;text-align:center;transition:background .15s,border-color .15s}
+.drop-zone.over{background:var(--ice);border-color:var(--teal-soft)}
+.drop-zone strong{display:block;font-size:14.5px;color:var(--teal)}
+.drop-zone span{display:block;font-size:13px;color:var(--ink-2);max-width:44ch;margin:4px auto 0}
+.file-btn{display:block;margin:12px auto 0}
+.file-btn{background:var(--teal);color:#fff;border:0;border-radius:4px;padding:8px 16px;font-size:13.5px;font-weight:600}
+.file-btn:hover{background:var(--teal-2)}
+.rules{font-size:12.5px;color:var(--ink-2);display:flex;flex-direction:column;gap:4px}
+.rules code{font-family:var(--mono);font-size:12px;background:var(--ice);padding:1px 5px;border-radius:3px;color:var(--plum)}
+.log{padding:20px;display:flex;flex-direction:column;gap:8px;min-height:150px}
+.log h4{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-3);font-family:var(--sans);font-weight:600}
+.log ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px;max-height:210px;overflow-y:auto}
+.log li{font-family:var(--mono);font-size:12px;line-height:1.45;padding-left:14px;position:relative;color:var(--ink-2)}
+.log li::before{content:"";position:absolute;left:0;top:6px;width:6px;height:6px;border-radius:50%;background:var(--teal-soft)}
+.log li.ok::before{background:var(--pos)}
+.log li.err::before{background:var(--neg)}
+.log li.warn::before{background:var(--warn)}
+
+/* ---------- banda de ejemplo ---------- */
+.demo-flag{display:flex;flex-wrap:wrap;align-items:center;gap:12px;background:var(--warn-bg);border:1px solid #EBD6A5;border-left:4px solid var(--warn);border-radius:4px;padding:10px 14px;font-size:13.5px;color:#6B4A0A}
+.demo-flag button{background:transparent;border:1px solid #C9A75C;color:#6B4A0A;border-radius:4px;padding:4px 12px;font-size:12.5px;font-weight:600}
+
+/* ---------- controles de la vista ---------- */
+.controls{background:var(--paper);border:1px solid var(--line);border-radius:6px;box-shadow:var(--shadow);padding:16px 20px;display:flex;flex-wrap:wrap;gap:22px;align-items:flex-start}
+.ctl{display:flex;flex-direction:column;gap:6px}
+.ctl label,.ctl legend{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-3);font-weight:600}
+.ctl input[type=number],.ctl select{font-family:var(--mono);font-size:13.5px;border:1px solid var(--line);border-radius:4px;padding:6px 8px;background:var(--paper);color:var(--ink)}
+fieldset.periods{border:0;margin:0;padding:0;display:flex;flex-direction:column;gap:6px;flex:1 1 340px}
+.period-chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);background:var(--ice-2);border-radius:999px;padding:4px 11px;font-family:var(--mono);font-size:12.5px;color:var(--ink-2);cursor:pointer}
+.chip input{accent-color:var(--teal);margin:0}
+.chip.on{background:var(--teal);border-color:var(--teal);color:#fff}
+
+/* ---------- tablero ---------- */
+.board{background:var(--paper);border:1px solid var(--line);border-radius:6px;box-shadow:var(--shadow);overflow:hidden}
+.board-head{padding:22px 24px 18px;display:grid;grid-template-columns:minmax(280px,1fr) auto;gap:20px;align-items:start;border-bottom:3px solid var(--plum)}
+@media (max-width:940px){.board-head{grid-template-columns:1fr}}
+.board-head h2{font-size:31px;font-weight:700;color:var(--plum);text-transform:uppercase;line-height:1}
+.board-head .tag{font-size:14.5px;color:var(--ink-2);margin-top:4px}
+.board-head .fx{font-family:var(--mono);font-size:12.5px;color:var(--teal);margin-top:10px;display:flex;align-items:center;gap:6px}
+.board-head .fx input{width:88px}
+.kpis{display:flex;gap:12px;flex-wrap:wrap}
+.kpi{border:1px solid var(--line);border-radius:5px;padding:11px 16px;min-width:172px;background:var(--ice-2)}
+.kpi .k-label{font-size:10.5px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:var(--teal-2)}
+.kpi .k-scope{font-size:11.5px;color:var(--ink-3)}
+.kpi .k-value{font-family:var(--display);font-size:27px;font-weight:700;color:var(--teal);line-height:1.1;margin-top:4px;font-variant-numeric:tabular-nums}
+.kpi .k-value .u{font-size:14px;color:var(--teal-2)}
+.kpi .k-alt{font-family:var(--mono);font-size:11.5px;color:var(--ink-3)}
+.kpi.accent{background:#FBF1F7;border-color:#E4C6D8}
+.kpi.accent .k-label{color:var(--plum-soft)}
+.kpi.accent .k-value{color:var(--plum)}
+.kpi.accent .k-value .u{color:var(--plum-soft)}
+
+/* ---------- matriz ---------- */
+.table-wrap{overflow-x:auto}
+table.matrix{border-collapse:collapse;width:100%;min-width:940px;font-variant-numeric:tabular-nums}
+table.matrix th,table.matrix td{padding:9px 12px;font-size:13px;border-bottom:1px solid var(--line-soft)}
+table.matrix thead th{color:#fff;font-family:var(--sans);font-weight:600;font-size:12px;line-height:1.25;text-align:center;border-bottom:0}
+table.matrix thead .grp{background:var(--teal);font-family:var(--display);font-size:16px;letter-spacing:.02em;border-left:2px solid var(--paper)}
+table.matrix thead .sub-h{background:var(--teal-2);border-left:1px solid rgba(255,255,255,.25)}
+table.matrix thead .sub-h.first{border-left:2px solid var(--paper)}
+table.matrix thead .rowhead{background:var(--plum);text-align:left;font-family:var(--display);font-size:19px;text-transform:uppercase;vertical-align:middle;padding-left:16px}
+table.matrix thead .delta-h{background:var(--teal);border-left:2px solid var(--paper);vertical-align:middle}
+table.matrix tbody th{text-align:left;font-weight:500;font-size:13px;color:var(--ink);padding-left:16px;background:var(--paper)}
+table.matrix tbody td{text-align:right;font-family:var(--mono);color:var(--ink)}
+table.matrix tbody tr:nth-child(even) th,table.matrix tbody tr:nth-child(even) td{background:var(--ice-2)}
+table.matrix td.gstart{border-left:2px solid var(--line)}
+table.matrix td.dif{color:var(--plum);font-weight:500}
+table.matrix td.delta{border-left:2px solid var(--line);color:var(--teal)}
+table.matrix tr.total th,table.matrix tr.total td{background:var(--teal)!important;color:#fff;font-weight:700;font-size:14px;border-bottom:0}
+table.matrix tr.total th{font-family:var(--display);font-size:17px;text-transform:uppercase}
+table.matrix tr.total td.dif,table.matrix tr.total td.delta{color:#fff}
+.muted-zero{color:var(--ink-3)}
+.board-foot{padding:10px 24px 16px;font-size:12px;color:var(--ink-2);display:flex;flex-direction:column;gap:3px}
+
+/* ---------- banda inferior ---------- */
+.band{display:grid;grid-template-columns:minmax(330px,1.35fr) minmax(300px,1fr);gap:0;border-top:1px solid var(--line-soft)}
+@media (max-width:940px){.band{grid-template-columns:1fr}}
+.panel{padding:20px 24px;display:flex;flex-direction:column;gap:12px}
+.panel+.panel{border-left:1px solid var(--line-soft)}
+@media (max-width:940px){.panel+.panel{border-left:0;border-top:1px solid var(--line-soft)}}
+.panel h3{font-family:var(--sans);font-size:12px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--teal-2)}
+.panel h3.plum{color:var(--plum-soft)}
+.chart-note{font-size:12px;color:var(--ink-3);font-family:var(--mono)}
+svg.wf{width:100%;height:auto;display:block}
+ul.keys{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:11px}
+ul.keys li{display:grid;grid-template-columns:18px 1fr;gap:9px;font-size:13.5px;line-height:1.5;color:var(--ink)}
+ul.keys li::before{content:"";width:15px;height:15px;margin-top:3px;border-radius:50%;background:var(--teal-soft);
+  -webkit-mask:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M6.4 11.6 3 8.2l1.1-1.1 2.3 2.3 5.5-5.5L13 5z'/></svg>") center/contain no-repeat;
+  mask:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M6.4 11.6 3 8.2l1.1-1.1 2.3 2.3 5.5-5.5L13 5z'/></svg>") center/contain no-repeat}
+ul.byres{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:0}
+ul.byres li{display:flex;justify-content:space-between;align-items:baseline;gap:14px;padding:8px 0;border-bottom:1px dotted var(--line);font-size:13.5px}
+ul.byres li:last-child{border-bottom:0;border-top:2px solid var(--plum);margin-top:2px;padding-top:10px;font-weight:700;color:var(--plum)}
+ul.byres .v{font-family:var(--mono);font-size:13px;white-space:nowrap;text-align:right}
+ul.byres .v small{display:block;color:var(--ink-3);font-size:11.5px}
+.note-box{background:var(--ice);border-left:3px solid var(--teal-soft);border-radius:0 4px 4px 0;padding:12px 14px;font-size:13.5px;color:var(--ink);min-height:44px}
+.note-box:focus{outline:2px solid var(--teal-2);outline-offset:1px}
+
+/* ---------- histórico ---------- */
+.ledger{background:var(--paper);border:1px solid var(--line);border-radius:6px;box-shadow:var(--shadow);padding:20px 22px;display:flex;flex-direction:column;gap:14px}
+.ledger h3{font-family:var(--display);font-size:20px;color:var(--plum);text-transform:uppercase}
+.ledger .hint{font-size:13px;color:var(--ink-2)}
+table.hist{border-collapse:collapse;width:100%;min-width:820px;font-variant-numeric:tabular-nums}
+table.hist th,table.hist td{padding:7px 10px;font-size:12.5px;border-bottom:1px solid var(--line-soft);text-align:right}
+table.hist thead th{background:var(--ice);color:var(--teal);font-size:11px;text-transform:uppercase;letter-spacing:.05em;text-align:right;border-bottom:1px solid var(--line)}
+table.hist th.l,table.hist td.l{text-align:left;font-family:var(--sans)}
+table.hist td{font-family:var(--mono);color:var(--ink-2)}
+table.hist td.src{font-size:11px;color:var(--ink-3)}
+table.hist tr.flagged td{background:var(--warn-bg)}
+table.hist button.del{border:1px solid var(--line);background:var(--paper);color:var(--neg);border-radius:3px;padding:2px 8px;font-size:11.5px}
+.io{display:flex;flex-direction:column;gap:8px}
+.io-actions{display:flex;flex-wrap:wrap;gap:8px}
+.io-actions button{border:1px solid var(--line);background:var(--ice-2);color:var(--teal);border-radius:4px;padding:6px 14px;font-size:13px;font-weight:600}
+.io-actions button:hover{background:var(--ice)}
+.io-actions button.danger{color:var(--neg)}
+textarea#json{width:100%;min-height:130px;font-family:var(--mono);font-size:11.5px;border:1px solid var(--line);border-radius:4px;padding:10px;color:var(--ink-2);background:var(--ice-2);resize:vertical}
+.hidden{display:none!important}
+footer.credits{font-size:12px;color:var(--ink-3);text-align:center;font-family:var(--mono)}
+@media print{
+  body{background:#fff}
+  .intake,.controls,.ledger,.demo-flag,footer.credits{display:none}
+  .board{border:0;box-shadow:none}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="app-head">
+    <div>
+      <h1>Reservas técnicas QES</h1>
+      <p class="sub">Metodología local (balanza contable) contra Método Estatutario CNSF, con histórico acumulado por periodo.</p>
+    </div>
+    <p class="stamp" id="stamp">Auditoría Interna · Qualitas</p>
+  </header>
+
+  <section class="intake" aria-label="Carga de archivos">
+    <div class="drop">
+      <div class="drop-zone" id="zone">
+        <strong>Suelta aquí los dos archivos</strong>
+        <span>Balanza de comprobación (.xlsx) y resultados de actuarios (.xlsb / .xlsx). El origen se detecta solo.</span>
+        <button class="file-btn" id="pick" type="button">Elegir archivos</button>
+        <input type="file" id="file" multiple accept=".xlsx,.xlsb,.xlsm,.xls" class="hidden" />
+      </div>
+      <div class="rules">
+        <span><strong>Metodología local</strong> — balanza, columna 3er grado:</span>
+        <span><code>2205</code> riesgos en curso · <code>2301</code> siniestros reportados · <code>2302</code> siniestros no reportados. El signo contable negativo se invierte.</span>
+        <span><strong>Método Estatutario CNSF</strong> — archivo de actuarios, concepto por concepto.</span>
+        <span><strong>Diferencia</strong> = Método Estatutario − Metodología local.</span>
+      </div>
+    </div>
+    <div class="log">
+      <h4>Lectura de archivos</h4>
+      <ul id="loglist"><li>Sin archivos cargados en esta sesión.</li></ul>
+    </div>
+  </section>
+
+  <div class="demo-flag hidden" id="demoflag">
+    <span><strong>Vista precargada con el histórico de ejemplo</strong> (ResultadosQES, jul-2025 a jun-2026). Carga tus archivos para sustituir cada periodo con datos propios.</span>
+    <button type="button" id="cleardemo">Vaciar histórico</button>
+  </div>
+
+  <section class="controls" aria-label="Parámetros de la vista">
+    <fieldset class="periods">
+      <legend>Periodos en la vista</legend>
+      <div class="period-chips" id="chips"></div>
+    </fieldset>
+    <div class="ctl">
+      <label for="unit">Unidades</label>
+      <select id="unit">
+        <option value="mmusd">Millones de USD</option>
+        <option value="usd">USD</option>
+        <option value="mmmxn">Millones de MXN</option>
+      </select>
+    </div>
+    <div class="ctl">
+      <label for="fx">Tipo de cambio MXN/USD</label>
+      <input type="number" id="fx" step="0.0001" min="0" value="17.4986" />
+    </div>
+  </section>
+
+  <section class="board" id="board" aria-label="Resultados">
+    <div class="board-head">
+      <div>
+        <h2>Resultados reservas técnicas QES</h2>
+        <p class="tag">Comparativo de metodologías y evolución del diferencial</p>
+        <p class="fx">Tipo de cambio: <span id="fxecho">17.4986</span> MXN / USD</p>
+      </div>
+      <div class="kpis" id="kpis"></div>
+    </div>
+
+    <div class="table-wrap">
+      <table class="matrix" id="matrix"></table>
+    </div>
+    <div class="board-foot" id="boardfoot"></div>
+
+    <div class="band">
+      <div class="panel">
+        <h3>Evolución de la diferencia entre metodologías</h3>
+        <p class="chart-note" id="chartnote"></p>
+        <svg class="wf" id="wf" viewBox="0 0 660 330" role="img" aria-labelledby="wftitle"><title id="wftitle">Puente de la diferencia entre metodologías</title></svg>
+      </div>
+      <div class="panel">
+        <h3>Mensajes clave</h3>
+        <ul class="keys" id="keys"></ul>
+      </div>
+    </div>
+
+    <div class="band">
+      <div class="panel">
+        <h3 class="plum" id="byres-title">Diferencias por reserva</h3>
+        <ul class="byres" id="byres"></ul>
+      </div>
+      <div class="panel">
+        <h3>Nota relevante</h3>
+        <div class="note-box" id="note" contenteditable="true" spellcheck="false"></div>
+        <p class="chart-note">Texto editable: se guarda en este navegador.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="ledger" aria-label="Histórico">
+    <h3>Histórico acumulado</h3>
+    <p class="hint">Cada archivo que cargues se conversa con lo ya guardado: actualiza su periodo y conserva los demás. El histórico vive en este navegador; usa el bloque JSON para respaldarlo o moverlo a otro equipo.</p>
+    <div class="table-wrap"><table class="hist" id="hist"></table></div>
+    <div class="io">
+      <div class="io-actions">
+        <button type="button" id="tojson">Mostrar histórico en JSON</button>
+        <button type="button" id="copyjson">Copiar</button>
+        <button type="button" id="fromjson">Cargar el JSON de la caja</button>
+        <button type="button" id="clearall" class="danger">Vaciar histórico</button>
+      </div>
+      <textarea id="json" spellcheck="false" placeholder="Aquí aparece el histórico en JSON. Pega uno para restaurarlo y pulsa «Cargar el JSON de la caja»."></textarea>
+    </div>
+  </section>
+
+  <footer class="credits">Reservas Técnicas QES · los archivos se procesan en tu navegador, nada se envía a ningún servidor.</footer>
+</div>
+
+<script>
+(function(){
+"use strict";
+
+/* =========================================================================
+   1. Configuración de conceptos
+   ========================================================================= */
+var CONCEPTS = [
+  { id:"rrc",  label:"Reserva de Riesgos en Curso",        cuenta:"2205", re:/riesgos en curso/ },
+  { id:"rsr",  label:"Reserva de Siniestros Reportados",   cuenta:"2301", re:/siniestros reportados/ },
+  { id:"rsnr", label:"Reserva de Siniestros No Reportados",cuenta:"2302", re:/no reportados/, nota:true }
+];
+var GRADO = 3;                       // columna de la balanza de la que se toma el saldo
+var LS_HIST = "qes-reservas-hist-v1";
+var LS_NOTE = "qes-reservas-nota-v1";
+var LS_FX   = "qes-reservas-fx-v1";
+var NOTA_DEFAULT = "La diferencia por metodologías de El Salvador aún no ha sido reconocida en los EEFF de QC.";
+
+var MESES = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"];
+
+/* =========================================================================
+   2. Utilidades
+   ========================================================================= */
+function norm(v){
+  return String(v == null ? "" : v).toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+    .replace(/\s+/g," ").trim();
+}
+function toNum(v){
+  if (typeof v === "number") return isFinite(v) ? v : null;
+  if (typeof v !== "string") return null;
+  var s = v.replace(/[\s$]/g,"").replace(/,/g,"");
+  var neg = /^\(.*\)$/.test(s);
+  if (neg) s = s.slice(1,-1);
+  if (!/^-?\d*\.?\d+$/.test(s)) return null;
+  var n = parseFloat(s);
+  return isFinite(n) ? (neg ? -n : n) : null;
+}
+function pad(n){ return n < 10 ? "0"+n : ""+n; }
+function iso(y,m,d){ return y+"-"+pad(m)+"-"+pad(d); }
+function lastDay(y,m){ return new Date(Date.UTC(y,m,0)).getUTCDate(); }
+function serialToISO(n){
+  if (typeof n !== "number" || n < 20000 || n > 80000) return null;
+  var d = new Date(Date.UTC(1899,11,30) + Math.round(n)*86400000);
+  return iso(d.getUTCFullYear(), d.getUTCMonth()+1, d.getUTCDate());
+}
+function cellToISO(v){
+  if (v instanceof Date) return iso(v.getUTCFullYear(), v.getUTCMonth()+1, v.getUTCDate());
+  if (typeof v === "number") return serialToISO(v);
+  return null;
+}
+function parseFecha(text){
+  var s = norm(text);
+  var m = s.match(/(\d{1,2})\s+de\s+([a-z]+)\s*(?:de\s*)?(\d{4})/);
+  if (!m) return null;
+  var mes = MESES.indexOf(m[2]);
+  if (mes < 0) return null;
+  return iso(parseInt(m[3],10), mes+1, parseInt(m[1],10));
+}
+function periodoDeNombre(name){                       // "Balanza_062026.xlsx" -> 2026-06-30
+  var m = String(name).match(/(0[1-9]|1[0-2])[_\-\.]?(20\d{2})/);
+  if (!m) return null;
+  var mes = parseInt(m[1],10), y = parseInt(m[2],10);
+  return iso(y, mes, lastDay(y,mes));
+}
+function etiquetaPeriodo(k){
+  var p = k.split("-");
+  return parseInt(p[2],10)+" "+MESES[parseInt(p[1],10)-1]+" "+p[0];
+}
+function etiquetaCorta(k){
+  var p = k.split("-");
+  var mes = MESES[parseInt(p[1],10)-1];
+  return mes.charAt(0).toUpperCase()+mes.slice(1)+" "+p[0];
+}
+function matchConcepto(text){
+  var s = norm(text);
+  if (!/reserva/.test(s)) return null;
+  for (var i=0;i<CONCEPTS.length;i++){
+    var c = CONCEPTS[i];
+    if (c.id === "rsr" && /no reportados/.test(s)) continue;
+    if (c.re.test(s)) return c;
+  }
+  return null;
+}
+
+/* =========================================================================
+   3. Lectura de la balanza de comprobación
+   ========================================================================= */
+function parseBalanza(wb, fname){
+  for (var s=0; s<wb.SheetNames.length; s++){
+    var rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[s]], {header:1, raw:true, blankrows:true, defval:null});
+    var h = -1;
+    for (var i=0; i<rows.length && i<60; i++){
+      if (rows[i] && norm(rows[i][0]) === "cuenta"){ h = i; break; }
+    }
+    if (h < 0) continue;
+
+    // columnas por grado: la fila de encabezado dice "GRADO" y la de arriba el ordinal
+    var grados = {}, hdr = rows[h], up = rows[h-1] || [];
+    for (var j=1; j<hdr.length; j++){
+      if (/grado/.test(norm(hdr[j]))){
+        var m = String(up[j] == null ? "" : up[j]).match(/(\d)/);
+        if (m) grados[parseInt(m[1],10)] = j;
+      }
+    }
+    var gradoCols = Object.keys(grados).map(function(k){ return grados[k]; });
+    if (!gradoCols.length) for (var g=2; g<9; g++) gradoCols.push(g);
+
+    // índice de cuentas
+    var cuentas = {};
+    for (var r=h+1; r<rows.length; r++){
+      var row = rows[r];
+      if (!row || row[0] == null) continue;
+      var key = String(row[0]).trim();
+      if (key && !(key in cuentas)) cuentas[key] = row;
+    }
+
+    // periodo: encabezado del reporte, si no, nombre del archivo
+    var periodo = null;
+    for (var t=0; t<=h && !periodo; t++){
+      var line = (rows[t]||[]).map(function(c){ return c == null ? "" : c; }).join(" ");
+      periodo = parseFecha(line);
+    }
+    if (!periodo) periodo = periodoDeNombre(fname);
+
+    var valores = {}, detalle = [], faltantes = [];
+    for (var c=0; c<CONCEPTS.length; c++){
+      var cn = CONCEPTS[c], row2 = cuentas[cn.cuenta];
+      if (!row2){ faltantes.push(cn.cuenta); continue; }
+      var val = null, colUsada = null;
+      if (grados[GRADO] != null) { val = toNum(row2[grados[GRADO]]); if (val != null) colUsada = GRADO; }
+      if (val == null){
+        for (var k=0; k<gradoCols.length; k++){
+          var v = toNum(row2[gradoCols[k]]);
+          if (v != null){
+            val = v;
+            for (var gg in grados) if (grados[gg] === gradoCols[k]) colUsada = parseInt(gg,10);
+            break;
+          }
+        }
+      }
+      if (val == null){ faltantes.push(cn.cuenta); continue; }
+      valores[cn.id] = Math.abs(val);                 // pasivo en negativo -> se invierte
+      detalle.push(cn.cuenta+" "+(colUsada?colUsada+"º grado":"")+" "+fmtFull(Math.abs(val)));
+    }
+    if (!Object.keys(valores).length) continue;
+    return { periodo:periodo, valores:valores, detalle:detalle, faltantes:faltantes, hoja:wb.SheetNames[s] };
+  }
+  return null;
+}
+
+/* =========================================================================
+   4. Lectura del archivo de actuarios (todas las fechas que traiga)
+   ========================================================================= */
+function parseActuarios(wb){
+  var out = {}, hojas = [];
+  for (var s=0; s<wb.SheetNames.length; s++){
+    var name = wb.SheetNames[s];
+    var rows = XLSX.utils.sheet_to_json(wb.Sheets[name], {header:1, raw:true, blankrows:true, defval:null});
+    var titulo = null, usada = false;
+    for (var i=0; i<rows.length; i++){
+      var row = rows[i];
+      if (!row) continue;
+      var concepto = null, ci = -1;
+      for (var j=0; j<row.length; j++){
+        var v = row[j];
+        if (typeof v !== "string") continue;
+        var c = matchConcepto(v);
+        if (c && ci < 0){ concepto = c; ci = j; }
+        else if (!c){ var f = parseFecha(v); if (f) titulo = f; }
+      }
+      if (!concepto) continue;
+
+      var periodo = null;
+      for (var j2=0; j2<ci; j2++){ var p = cellToISO(row[j2]); if (p){ periodo = p; break; } }
+      if (!periodo) periodo = titulo;
+      if (!periodo) continue;
+
+      var nums = [];
+      for (var j3=ci+1; j3<row.length && nums.length<2; j3++){
+        var n = toNum(row[j3]);
+        if (n != null) nums.push(Math.abs(n));
+      }
+      if (nums.length < 2) continue;
+
+      if (!out[periodo]) out[periodo] = { local:{}, cnsf:{} };
+      out[periodo].local[concepto.id] = nums[0];
+      out[periodo].cnsf[concepto.id]  = nums[1];
+      usada = true;
+    }
+    if (usada) hojas.push(name);
+  }
+  return { periodos:out, hojas:hojas };
+}
+
+/* =========================================================================
+   5. Histórico
+   ========================================================================= */
+var HIST = {};
+function loadHist(){
+  try { HIST = JSON.parse(localStorage.getItem(LS_HIST) || "null") || {}; }
+  catch(e){ HIST = {}; }
+}
+function saveHist(){
+  try { localStorage.setItem(LS_HIST, JSON.stringify(HIST)); } catch(e){}
+}
+function entry(p){
+  if (!HIST[p]) HIST[p] = { periodo:p, local:{}, cnsf:{}, origen:{}, demo:false };
+  if (!HIST[p].origen) HIST[p].origen = {};
+  return HIST[p];
+}
+function periodos(){ return Object.keys(HIST).sort(); }
+
+var DEMO = [
+  ["2025-07-31", 8331317.86, 2818658.21,   12701.88, 11142522.965977654, 2818658.21, 325011.19130607665],
+  ["2025-09-30", 8723257.33, 3722728.06,   12701.88, 11817782.398293784, 3722728.06, 423226.9276352292],
+  ["2025-11-30", 9132774.22, 4246854.22,   12701.88, 12231493.45148008,  4246854.22, 599138.6395873892],
+  ["2025-12-31", 9278886.43, 3890396.27,    7461.06, 12604139.423587479, 3890396.27, 419827.7013928825],
+  ["2026-03-31", 9171744.38, 4187990.32,    7461.06, 12718231.3682502,   4187990.32, 555998.703069078],
+  ["2026-06-30", 9084601.70, 2773742.22,    7461.06, 12799633.262026342, 2773742.22, 809405.381818776]
+];
+function seedDemo(){
+  DEMO.forEach(function(d){
+    HIST[d[0]] = {
+      periodo:d[0],
+      local:{ rrc:d[1], rsr:d[2], rsnr:d[3] },
+      cnsf: { rrc:d[4], rsr:d[5], rsnr:d[6] },
+      origen:{ local:"Ejemplo ResultadosQES", cnsf:"Ejemplo ResultadosQES" },
+      demo:true
+    };
+  });
+}
+function hayDemo(){ return periodos().some(function(p){ return HIST[p].demo; }); }
+
+/* =========================================================================
+   6. Estado de la vista
+   ========================================================================= */
+var seleccion = [];          // periodos marcados, orden ascendente
+var unidad = "mmusd";
+var fx = 17.4986;
+
+function totalDe(obj){
+  return CONCEPTS.reduce(function(a,c){ return a + (typeof obj[c.id] === "number" ? obj[c.id] : 0); }, 0);
+}
+function difDe(e, id){
+  var a = e.cnsf[id], b = e.local[id];
+  if (typeof a !== "number" || typeof b !== "number") return null;
+  return a - b;
+}
+
+/* --------------------------- formato ----------------------------------- */
+function fmtFull(v){
+  return v.toLocaleString("en-US",{minimumFractionDigits:2, maximumFractionDigits:2});
+}
+function escala(v){
+  if (unidad === "usd")   return v;
+  if (unidad === "mmmxn") return v * fx / 1e6;
+  return v / 1e6;
+}
+function fmtCell(v){
+  if (v == null) return '<span class="muted-zero">n/d</span>';
+  var e = escala(v);
+  if (Math.abs(e) < (unidad === "usd" ? 0.005 : 0.005)) return '<span class="muted-zero">—</span>';
+  var d = unidad === "usd" ? 2 : 2;
+  return "$ " + e.toLocaleString("en-US",{minimumFractionDigits:d, maximumFractionDigits:d});
+}
+function mm(v){ return (v/1e6).toLocaleString("en-US",{minimumFractionDigits:2, maximumFractionDigits:2}); }
+function mmx(v){ return (v*fx/1e6).toLocaleString("en-US",{minimumFractionDigits:2, maximumFractionDigits:2}); }
+function unidadTexto(){
+  return unidad === "usd" ? "USD" : unidad === "mmmxn" ? "millones de MXN" : "millones de USD";
+}
+
+/* =========================================================================
+   7. Render
+   ========================================================================= */
+function render(){
+  renderChips();
+  var ps = seleccion.slice().sort();
+  var cur = ps[ps.length-1], prev = ps.length > 1 ? ps[ps.length-2] : null;
+  renderKpis(cur, prev);
+  renderMatrix(ps, cur, prev);
+  renderChart(cur, prev);
+  renderKeys(cur, prev);
+  renderByReserve(cur);
+  renderHist();
+  document.getElementById("fxecho").textContent = fx.toFixed(4);
+  document.getElementById("demoflag").classList.toggle("hidden", !hayDemo());
+}
+
+function renderChips(){
+  var box = document.getElementById("chips");
+  var ps = periodos();
+  box.innerHTML = "";
+  if (!ps.length){ box.innerHTML = '<span class="chip">Sin periodos en el histórico</span>'; return; }
+  ps.forEach(function(p){
+    var on = seleccion.indexOf(p) >= 0;
+    var l = document.createElement("label");
+    l.className = "chip" + (on ? " on" : "");
+    l.innerHTML = '<input type="checkbox" '+(on?"checked":"")+' value="'+p+'" /> '+etiquetaPeriodo(p);
+    l.querySelector("input").addEventListener("change", function(ev){
+      if (ev.target.checked) seleccion.push(p);
+      else seleccion = seleccion.filter(function(x){ return x !== p; });
+      seleccion.sort();
+      if (!seleccion.length) seleccion = [p];
+      render();
+    });
+    box.appendChild(l);
+  });
+}
+
+function renderKpis(cur, prev){
+  var box = document.getElementById("kpis");
+  box.innerHTML = "";
+  if (!cur){ box.innerHTML = '<p class="k-scope">Carga un archivo para ver los indicadores.</p>'; return; }
+  var e = HIST[cur];
+  var difCur = totalDe(e.cnsf) - totalDe(e.local);
+  var tiles = [{
+    cls:"", label:"Diferencia total", scope:etiquetaCorta(cur),
+    value:"USD "+mm(difCur), unit:"MM", alt:"~MXN "+mmx(difCur)+" MM"
+  }];
+  if (prev){
+    var d0 = totalDe(HIST[prev].cnsf) - totalDe(HIST[prev].local);
+    var v  = difCur - d0;
+    tiles.push({ cls:"accent", label:"Variación del periodo", scope:etiquetaCorta(prev)+" → "+etiquetaCorta(cur),
+      value:(v>=0?"+":"−")+"USD "+mm(Math.abs(v)), unit:"MM", alt:"~MXN "+mmx(Math.abs(v))+" MM" });
+    tiles.push({ cls:"", label:"Variación % de la diferencia", scope:etiquetaCorta(prev)+" → "+etiquetaCorta(cur),
+      value:(d0 ? ((v/d0>=0?"+":"−")+Math.abs(v/d0*100).toFixed(1)+"%") : "n/d"), unit:"", alt:"sobre USD "+mm(d0)+" MM" });
+  }
+  tiles.forEach(function(t){
+    var d = document.createElement("div");
+    d.className = "kpi "+t.cls;
+    d.innerHTML = '<div class="k-label">'+t.label+'</div><div class="k-scope">'+t.scope+'</div>'+
+                  '<div class="k-value">'+t.value+(t.unit?' <span class="u">'+t.unit+'</span>':'')+'</div>'+
+                  '<div class="k-alt">'+t.alt+'</div>';
+    box.appendChild(d);
+  });
+}
+
+function renderMatrix(ps, cur, prev){
+  var t = document.getElementById("matrix");
+  if (!ps.length){ t.innerHTML = '<tbody><tr><td style="padding:24px">Sin periodos seleccionados.</td></tr></tbody>'; return; }
+  var h1 = '<tr><th class="rowhead" rowspan="2">Reserva</th>';
+  var h2 = "<tr>";
+  ps.forEach(function(p){
+    h1 += '<th class="grp" colspan="3">'+etiquetaPeriodo(p)+"</th>";
+    h2 += '<th class="sub-h first">Metodología<br />local</th><th class="sub-h">CNSF<br />Método Estatutario</th><th class="sub-h">Diferencia<br />(estatutario − local)</th>';
+  });
+  if (prev) h1 += '<th class="delta-h" rowspan="2">Incremento<br />respecto de<br />'+etiquetaCorta(prev)+"</th>";
+  h1 += "</tr>"; h2 += "</tr>";
+
+  var body = "";
+  CONCEPTS.forEach(function(c){
+    body += "<tr><th>"+c.label+(c.nota?" *":"")+"</th>";
+    ps.forEach(function(p){
+      var e = HIST[p];
+      body += '<td class="gstart">'+fmtCell(e.local[c.id])+"</td>";
+      body += "<td>"+fmtCell(e.cnsf[c.id])+"</td>";
+      body += '<td class="dif">'+fmtCell(difDe(e,c.id))+"</td>";
+    });
+    if (prev){
+      var a = difDe(HIST[cur],c.id), b = difDe(HIST[prev],c.id);
+      body += '<td class="delta">'+fmtCell(a != null && b != null ? a-b : null)+"</td>";
+    }
+    body += "</tr>";
+  });
+
+  body += '<tr class="total"><th>Total reservas</th>';
+  ps.forEach(function(p){
+    var e = HIST[p], tl = totalDe(e.local), tc = totalDe(e.cnsf);
+    body += '<td class="gstart">'+fmtCell(tl)+"</td><td>"+fmtCell(tc)+'</td><td class="dif">'+fmtCell(tc-tl)+"</td>";
+  });
+  if (prev){
+    var dc = totalDe(HIST[cur].cnsf)-totalDe(HIST[cur].local);
+    var dp = totalDe(HIST[prev].cnsf)-totalDe(HIST[prev].local);
+    body += '<td class="delta">'+fmtCell(dc-dp)+"</td>";
+  }
+  body += "</tr>";
+
+  t.innerHTML = "<thead>"+h1+h2+"</thead><tbody>"+body+"</tbody>";
+
+  var foot = document.getElementById("boardfoot");
+  foot.innerHTML = "<span>Cifras en "+unidadTexto()+". * Esta reserva se calcula una vez al año, al cierre del ejercicio, en atención a la normativa de El Salvador.</span>"+
+    "<span>La diferencia se presenta como Método Estatutario CNSF menos Metodología local, es decir el exceso de constitución del método estatutario.</span>";
+}
+
+function renderChart(cur, prev){
+  var svg = document.getElementById("wf");
+  var note = document.getElementById("chartnote");
+  var W = 660, H = 330, L = 46, R = 16, T = 46, B = 74;
+  var ns = "http://www.w3.org/2000/svg";
+  while (svg.childNodes.length > 1) svg.removeChild(svg.lastChild);
+
+  if (!cur || !prev){
+    note.textContent = "Selecciona al menos dos periodos para ver el puente.";
+    return;
+  }
+  note.textContent = "Millones de USD · "+etiquetaCorta(prev)+" → "+etiquetaCorta(cur);
+
+  var d0 = (totalDe(HIST[prev].cnsf)-totalDe(HIST[prev].local))/1e6;
+  var d1 = (totalDe(HIST[cur].cnsf)-totalDe(HIST[cur].local))/1e6;
+  var steps = [{ tipo:"base", label:etiquetaCorta(prev), sub:"Diferencia total", valor:d0 }];
+  CONCEPTS.forEach(function(c){
+    var a = difDe(HIST[cur],c.id), b = difDe(HIST[prev],c.id);
+    if (a == null || b == null) return;
+    var v = (a-b)/1e6;
+    if (Math.abs(v) < 0.005) return;
+    steps.push({ tipo:"delta", label:c.label.replace("Reserva de ",""), sub:(v>=0?"Incremento":"Disminución"), valor:v });
+  });
+  steps.push({ tipo:"base", label:etiquetaCorta(cur), sub:"Diferencia total", valor:d1 });
+
+  var run = 0, geo = [], maxv = Math.max(d0, d1, 0.0001);
+  steps.forEach(function(s){
+    if (s.tipo === "base"){ geo.push({ s:s, y0:0, y1:s.valor }); run = s.valor; }
+    else { geo.push({ s:s, y0:run, y1:run+s.valor }); run += s.valor; maxv = Math.max(maxv, run); }
+  });
+  var top = maxv * 1.22;
+  var y = function(v){ return T + (H-T-B) * (1 - v/top); };
+  var innerW = W-L-R, slot = innerW/geo.length, bw = Math.min(70, slot*0.54);
+
+  function el(tag, attrs, text){
+    var n = document.createElementNS(ns, tag);
+    for (var k in attrs) n.setAttribute(k, attrs[k]);
+    if (text != null) n.textContent = text;
+    svg.appendChild(n);
+    return n;
+  }
+  // eje base
+  el("line", { x1:L-8, y1:y(0), x2:W-R, y2:y(0), stroke:"#C9D8E1", "stroke-width":1 });
+
+  geo.forEach(function(g,i){
+    var cx = L + slot*i + slot/2;
+    var yA = y(Math.max(g.y0,g.y1)), yB = y(Math.min(g.y0,g.y1));
+    var hgt = Math.max(3, yB-yA);
+    var fill = g.s.tipo === "base" ? "#8E2A66" : (g.s.valor >= 0 ? "#1B6C86" : "#B04234");
+    el("rect", { x:cx-bw/2, y:yA, width:bw, height:hgt, fill:fill, rx:1 });
+    el("text", { x:cx, y:yA-9, "text-anchor":"middle", fill:g.s.tipo==="base"?"#5B1A44":"#134E63",
+      "font-family":"IBM Plex Mono, monospace", "font-size":"13", "font-weight":"500" },
+      (g.s.tipo==="base" ? "" : (g.s.valor>=0?"+":"−")) + Math.abs(g.s.valor).toFixed(2));
+    var l1 = el("text", { x:cx, y:H-B+22, "text-anchor":"middle", fill:"#16252D",
+      "font-family":"IBM Plex Sans, sans-serif", "font-size":"11.5" });
+    var words = g.s.label.split(" "), line = "", lines = [];
+    words.forEach(function(w){
+      if ((line+" "+w).trim().length > 18){ lines.push(line.trim()); line = w; }
+      else line += " "+w;
+    });
+    lines.push(line.trim());
+    lines.forEach(function(txt,k){
+      var ts = document.createElementNS(ns,"tspan");
+      ts.setAttribute("x", cx); ts.setAttribute("dy", k===0?0:13);
+      ts.textContent = txt; l1.appendChild(ts);
+    });
+    el("text", { x:cx, y:H-B+22+lines.length*13, "text-anchor":"middle", fill:"#7B8C95",
+      "font-family":"IBM Plex Sans, sans-serif", "font-size":"10.5" }, g.s.sub);
+    if (i < geo.length-1){
+      var yEnd = y(g.s.tipo === "base" && i === 0 ? g.y1 : g.y1);
+      el("line", { x1:cx+bw/2, y1:yEnd, x2:L+slot*(i+1)+slot/2-bw/2, y2:yEnd,
+        stroke:"#9FB6C2", "stroke-width":1, "stroke-dasharray":"4 3" });
+    }
+  });
+  el("text", { x:L-8, y:T-18, fill:"#7B8C95", "font-family":"IBM Plex Mono, monospace", "font-size":"11" },
+     "Diferencia acumulada (MM USD)");
+}
+
+function renderKeys(cur, prev){
+  var ul = document.getElementById("keys");
+  ul.innerHTML = "";
+  if (!cur){ ul.innerHTML = "<li>Carga la balanza y el archivo de actuarios para generar los mensajes.</li>"; return; }
+  var msgs = [];
+  var e1 = HIST[cur];
+  var d1 = totalDe(e1.cnsf) - totalDe(e1.local);
+
+  if (prev){
+    var e0 = HIST[prev], d0 = totalDe(e0.cnsf) - totalDe(e0.local);
+    var vLocal = totalDe(e1.local) - totalDe(e0.local);
+    var vCnsf  = totalDe(e1.cnsf)  - totalDe(e0.cnsf);
+    var rango = "Entre "+etiquetaCorta(prev).toLowerCase()+" y "+etiquetaCorta(cur).toLowerCase();
+
+    var driver = null;
+    CONCEPTS.forEach(function(c){
+      if (typeof e1.local[c.id] !== "number" || typeof e0.local[c.id] !== "number") return;
+      var d = e1.local[c.id]-e0.local[c.id];
+      if (!driver || Math.abs(d) > Math.abs(driver.d)) driver = { c:c, d:d };
+    });
+    msgs.push(rango+", las reservas bajo QES Metodología local "+(vLocal>=0?"aumentan":"disminuyen")+" USD "+mm(Math.abs(vLocal))+" MM"+
+      (driver ? ", principalmente por "+(driver.d>=0?"el incremento":"la reducción")+" de USD "+mm(Math.abs(driver.d))+" MM en la "+driver.c.label.replace("Reserva de ","reserva de ") : "")+".");
+
+    var sube = [], baja = [];
+    CONCEPTS.forEach(function(c){
+      if (typeof e1.cnsf[c.id] !== "number" || typeof e0.cnsf[c.id] !== "number") return;
+      var d = e1.cnsf[c.id]-e0.cnsf[c.id];
+      if (Math.abs(d) < 5000) return;
+      (d>0?sube:baja).push({ c:c, d:Math.abs(d) });
+    });
+    var frase = "Bajo el Método Estatutario, las reservas totales "+(vCnsf>=0?"aumentan":"disminuyen")+" USD "+mm(Math.abs(vCnsf))+" MM.";
+    function lista(arr){
+      return arr.map(function(x){ return "USD "+mm(x.d)+" MM en "+x.c.label.replace("Reserva de ","").toLowerCase(); }).join(" y de ");
+    }
+    if (sube.length && baja.length){
+      frase += " El incremento de "+lista(sube)+" fue "+(vCnsf>=0?"parcialmente compensado":"más que compensado")+" por la disminución de "+lista(baja)+".";
+    } else if (sube.length){ frase += " El movimiento se concentra en el incremento de "+lista(sube)+"."; }
+    else if (baja.length){ frase += " El movimiento se concentra en la disminución de "+lista(baja)+"."; }
+    msgs.push(frase);
+
+    var v = d1-d0;
+    msgs.push((d1>=0 ? "El Método Estatutario mantiene una posición superior." : "La Metodología local se mantiene por encima del Método Estatutario.")+
+      " La diferencia total por constitución pasa de USD "+mm(d0)+" MM en "+etiquetaCorta(prev).toLowerCase()+
+      " a USD "+mm(d1)+" MM en "+etiquetaCorta(cur).toLowerCase()+", con "+(v>=0?"un incremento":"una disminución")+" de USD "+mm(Math.abs(v))+" MM"+
+      (d0 ? " ("+(v>=0?"+":"−")+Math.abs(v/d0*100).toFixed(1)+"%)" : "")+".");
+  } else {
+    msgs.push("Al "+etiquetaPeriodo(cur)+", la diferencia entre metodologías asciende a USD "+mm(d1)+" MM (~MXN "+mmx(d1)+" MM).");
+    msgs.push("Agrega un periodo anterior al histórico para comparar la evolución del diferencial.");
+  }
+  msgs.forEach(function(m){ var li = document.createElement("li"); li.textContent = m; ul.appendChild(li); });
+}
+
+function renderByReserve(cur){
+  var ul = document.getElementById("byres");
+  var ttl = document.getElementById("byres-title");
+  ul.innerHTML = "";
+  if (!cur){ ttl.textContent = "Diferencias por reserva"; return; }
+  ttl.textContent = "Diferencias a "+etiquetaCorta(cur).toLowerCase()+" por reserva (estatutario − local)";
+  var e = HIST[cur], total = 0;
+  CONCEPTS.forEach(function(c){
+    var d = difDe(e,c.id);
+    if (d == null || Math.abs(d) < 5000) return;
+    total += d;
+    var li = document.createElement("li");
+    li.innerHTML = "<span>"+c.label+'</span><span class="v">USD '+mm(d)+" MM<small>~MXN "+mmx(d)+" MM</small></span>";
+    ul.appendChild(li);
+  });
+  var t = totalDe(e.cnsf)-totalDe(e.local);
+  var li2 = document.createElement("li");
+  li2.innerHTML = '<span>Total de reservas<br /><small style="font-weight:400;color:var(--ink-3)">incremento por constitución</small></span>'+
+                  '<span class="v">USD '+mm(t)+" MM<small>~MXN "+mmx(t)+" MM</small></span>";
+  ul.appendChild(li2);
+}
+
+function corto(o){
+  if (!o) return "—";
+  if (o.indexOf("Ejemplo") === 0) return "ejemplo";
+  return o.split(" · ")[0].toLowerCase();
+}
+function escAttr(t){ return String(t).replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;"); }
+function renderHist(){
+  var t = document.getElementById("hist");
+  var ps = periodos();
+  if (!ps.length){ t.innerHTML = '<tbody><tr><td class="l" style="padding:14px">El histórico está vacío. Carga un archivo para empezar.</td></tr></tbody>'; return; }
+  var head = '<thead><tr><th class="l">Periodo</th>';
+  CONCEPTS.forEach(function(c){ head += "<th>"+c.label.replace("Reserva de ","")+" local</th><th>"+c.label.replace("Reserva de ","")+" CNSF</th>"; });
+  head += "<th>Diferencia total</th><th class=\"l\">Origen</th><th></th></tr></thead>";
+  var body = "";
+  ps.forEach(function(p){
+    var e = HIST[p];
+    var flag = e.aviso ? ' class="flagged"' : "";
+    body += "<tr"+flag+'><td class="l">'+etiquetaPeriodo(p)+(e.demo?' <small style="color:var(--warn)">ejemplo</small>':"")+"</td>";
+    CONCEPTS.forEach(function(c){
+      body += "<td>"+(typeof e.local[c.id]==="number"?fmtFull(e.local[c.id]):"—")+"</td>";
+      body += "<td>"+(typeof e.cnsf[c.id]==="number"?fmtFull(e.cnsf[c.id]):"—")+"</td>";
+    });
+    body += "<td>"+fmtFull(totalDe(e.cnsf)-totalDe(e.local))+"</td>";
+    body += '<td class="src l" title="'+escAttr(((e.origen&&e.origen.local)||"—")+" | "+((e.origen&&e.origen.cnsf)||"—"))+'">'+
+            corto((e.origen&&e.origen.local))+" / "+corto((e.origen&&e.origen.cnsf))+(e.aviso?'<br /><span style="color:var(--warn)">'+e.aviso+"</span>":"")+"</td>";
+    body += '<td><button class="del" data-p="'+p+'" type="button">Quitar</button></td></tr>';
+  });
+  t.innerHTML = head+"<tbody>"+body+"</tbody>";
+  Array.prototype.forEach.call(t.querySelectorAll("button.del"), function(b){
+    b.addEventListener("click", function(){
+      delete HIST[b.getAttribute("data-p")];
+      seleccion = seleccion.filter(function(x){ return HIST[x]; });
+      if (!seleccion.length) seleccion = periodos().slice(-3);
+      saveHist(); render();
+    });
+  });
+}
+
+/* =========================================================================
+   8. Carga de archivos
+   ========================================================================= */
+function log(msg, cls){
+  var ul = document.getElementById("loglist");
+  if (ul.dataset.virgen !== "no"){ ul.innerHTML = ""; ul.dataset.virgen = "no"; }
+  var li = document.createElement("li");
+  li.className = cls || "";
+  li.innerHTML = msg;
+  ul.insertBefore(li, ul.firstChild);
+}
+
+function handleFiles(files){
+  Array.prototype.forEach.call(files, function(f){
+    var reader = new FileReader();
+    reader.onload = function(ev){
+      var wb;
+      try { wb = XLSX.read(new Uint8Array(ev.target.result), { type:"array", cellDates:true }); }
+      catch(err){ log("No se pudo leer <strong>"+f.name+"</strong>: "+err.message, "err"); return; }
+      procesar(wb, f.name);
+    };
+    reader.onerror = function(){ log("No se pudo abrir <strong>"+f.name+"</strong>.", "err"); };
+    reader.readAsArrayBuffer(f);
+  });
+}
+
+function procesar(wb, fname){
+  var bal = parseBalanza(wb, fname);
+  if (bal){
+    if (!bal.periodo){
+      log("<strong>"+fname+"</strong>: se leyó la balanza pero no se identificó el periodo. Renombra el archivo como Balanza_MMAAAA.xlsx.", "err");
+      return;
+    }
+    var e = entry(bal.periodo);
+    e.demo = false;
+    CONCEPTS.forEach(function(c){ if (typeof bal.valores[c.id] === "number") e.local[c.id] = bal.valores[c.id]; });
+    e.origen.local = "Balanza · "+fname;
+    revisar(e);
+    saveHist(); asegurarSeleccion(bal.periodo); render();
+    log("<strong>"+fname+"</strong> → balanza al "+etiquetaPeriodo(bal.periodo)+" · "+bal.detalle.join(" · ")+
+        (bal.faltantes.length?' <span style="color:var(--neg)">sin cuenta '+bal.faltantes.join(", ")+"</span>":""),
+        bal.faltantes.length ? "warn" : "ok");
+    return;
+  }
+  var act = parseActuarios(wb);
+  var ps = Object.keys(act.periodos).sort();
+  if (!ps.length){
+    log("<strong>"+fname+"</strong>: no se reconoció ni como balanza (falta la columna CUENTA) ni como archivo de actuarios (faltan los tres conceptos de reserva).", "err");
+    return;
+  }
+  ps.forEach(function(p){
+    var e = entry(p), src = act.periodos[p];
+    e.demo = false;
+    CONCEPTS.forEach(function(c){
+      if (typeof src.cnsf[c.id] === "number") e.cnsf[c.id] = src.cnsf[c.id];
+    });
+    e.localActuarios = src.local;
+    if (!e.origen.local || e.origen.local.indexOf("Actuarios") === 0 || e.origen.local.indexOf("Ejemplo") === 0){
+      CONCEPTS.forEach(function(c){
+        if (typeof src.local[c.id] === "number" && typeof e.local[c.id] !== "number") e.local[c.id] = src.local[c.id];
+      });
+      if (!e.origen.local) e.origen.local = "Actuarios · "+fname;
+    }
+    e.origen.cnsf = "Actuarios · "+fname;
+    revisar(e);
+  });
+  saveHist(); asegurarSeleccion(ps[ps.length-1]); render();
+  log("<strong>"+fname+"</strong> → actuarios, "+ps.length+" periodo(s): "+ps.map(etiquetaCorta).join(", ")+
+      " · hojas: "+act.hojas.join(", "), "ok");
+  periodos().forEach(function(p){
+    if (HIST[p].aviso) log("Revisar "+etiquetaPeriodo(p)+": "+HIST[p].aviso, "warn");
+  });
+}
+
+function revisar(e){
+  delete e.aviso;
+  if (!e.localActuarios) return;
+  var difs = [];
+  CONCEPTS.forEach(function(c){
+    var a = e.local[c.id], b = e.localActuarios[c.id];
+    if (typeof a === "number" && typeof b === "number" && Math.abs(a-b) > 0.5){
+      difs.push(c.label.replace("Reserva de ","")+": balanza "+fmtFull(a)+" vs actuarios "+fmtFull(b));
+    }
+  });
+  if (difs.length) e.aviso = "Metodología local no coincide — "+difs.join("; ");
+}
+
+function asegurarSeleccion(p){
+  if (seleccion.indexOf(p) < 0) seleccion.push(p);
+  seleccion = seleccion.filter(function(x){ return HIST[x]; }).sort();
+  if (seleccion.length > 4) seleccion = seleccion.slice(-4);
+  if (!seleccion.length) seleccion = periodos().slice(-3);
+}
+
+/* =========================================================================
+   9. Eventos
+   ========================================================================= */
+var zone = document.getElementById("zone"), fileInput = document.getElementById("file");
+document.getElementById("pick").addEventListener("click", function(){ fileInput.click(); });
+fileInput.addEventListener("change", function(){ handleFiles(fileInput.files); fileInput.value = ""; });
+["dragenter","dragover"].forEach(function(t){
+  zone.addEventListener(t, function(ev){ ev.preventDefault(); zone.classList.add("over"); });
+});
+["dragleave","drop"].forEach(function(t){
+  zone.addEventListener(t, function(ev){ ev.preventDefault(); zone.classList.remove("over"); });
+});
+zone.addEventListener("drop", function(ev){ if (ev.dataTransfer && ev.dataTransfer.files) handleFiles(ev.dataTransfer.files); });
+
+document.getElementById("unit").addEventListener("change", function(ev){ unidad = ev.target.value; render(); });
+document.getElementById("fx").addEventListener("input", function(ev){
+  var v = parseFloat(ev.target.value);
+  if (isFinite(v) && v > 0){ fx = v; try{ localStorage.setItem(LS_FX, String(v)); }catch(e){} render(); }
+});
+document.getElementById("cleardemo").addEventListener("click", function(){
+  periodos().forEach(function(p){ if (HIST[p].demo) delete HIST[p]; });
+  seleccion = periodos().slice(-3); saveHist(); render();
+});
+document.getElementById("clearall").addEventListener("click", function(){
+  if (!confirm("Se borra todo el histórico guardado en este navegador. ¿Continuar?")) return;
+  HIST = {}; seleccion = []; saveHist(); render();
+});
+document.getElementById("tojson").addEventListener("click", function(){
+  document.getElementById("json").value = JSON.stringify(HIST, null, 2);
+});
+document.getElementById("copyjson").addEventListener("click", function(){
+  var ta = document.getElementById("json");
+  if (!ta.value) ta.value = JSON.stringify(HIST, null, 2);
+  ta.select();
+  if (navigator.clipboard) navigator.clipboard.writeText(ta.value);
+  else document.execCommand("copy");
+});
+document.getElementById("fromjson").addEventListener("click", function(){
+  var ta = document.getElementById("json");
+  try {
+    var obj = JSON.parse(ta.value);
+    if (!obj || typeof obj !== "object") throw new Error("formato no válido");
+    HIST = obj;
+    seleccion = periodos().slice(-3);
+    saveHist(); render();
+    log("Histórico restaurado desde JSON: "+periodos().length+" periodo(s).", "ok");
+  } catch(err){ log("El JSON de la caja no se pudo cargar: "+err.message, "err"); }
+});
+var noteBox = document.getElementById("note");
+noteBox.addEventListener("blur", function(){
+  try { localStorage.setItem(LS_NOTE, noteBox.textContent.trim()); } catch(e){}
+});
+
+/* =========================================================================
+   10. Arranque
+   ========================================================================= */
+loadHist();
+if (!periodos().length) seedDemo();
+try {
+  var f = parseFloat(localStorage.getItem(LS_FX));
+  if (isFinite(f) && f > 0){ fx = f; document.getElementById("fx").value = f; }
+} catch(e){}
+try { noteBox.textContent = localStorage.getItem(LS_NOTE) || NOTA_DEFAULT; }
+catch(e){ noteBox.textContent = NOTA_DEFAULT; }
+seleccion = periodos().slice(-3);
+render();
+
+})();
+</script>
+</body>
+</html>
