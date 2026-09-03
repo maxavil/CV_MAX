@@ -51,3 +51,25 @@ Cada archivo cargado actualiza su periodo y conserva los demás; el histórico s
 `localStorage` de ese navegador. El bloque JSON al final permite respaldarlo, moverlo a otro
 equipo o restaurarlo. Al abrirlo por primera vez la vista viene precargada con el histórico
 de ejemplo (jul-2025 a jun-2026), marcado como tal y sustituible por los datos propios.
+
+## Versión en Python
+
+`reservas/reservas_qes.py` hace la misma ingesta fuera del navegador, para un proceso
+mensual por lotes. Lee `.xlsx` con openpyxl y `.xlsb` con pyxlsb, detecta solo cuál archivo
+es cuál, funde el resultado en un JSON de histórico e imprime la vista.
+
+```
+pip install openpyxl pyxlsb
+python reservas/reservas_qes.py Balanza_062026.xlsx ResultadosQES.xlsb --hist historico.json
+```
+
+Como módulo:
+
+```python
+from reservas_qes import Historico
+h = Historico("historico.json")
+h.procesar("Balanza_072026.xlsx")     # actualiza solo su periodo
+h.procesar("ResultadosQES.xlsb")      # carga todos los cortes que traiga
+h.guardar()
+print(h.vista())                      # o h.diferencia("2026-06-30")
+```
