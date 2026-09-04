@@ -518,5 +518,7 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-if __name__ == "__main__":
+if __name__ == "__main__" and "ipykernel" not in sys.modules:
+    # dentro de Jupyter no se arranca la CLI: ahí argparse vería los argumentos
+    # del kernel ("-f <connection file>") y abortaría. Usa la clase Historico.
     raise SystemExit(main())
