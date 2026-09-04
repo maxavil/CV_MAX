@@ -665,11 +665,15 @@ def exportar_excel(hist: "Historico", destino: str | Path,
 # =========================================================================
 
 
-def abrir_gui(hist_ruta: str | Path = "historico_reservas.json") -> None:
+def abrir_gui(hist_ruta: str | Path = "historico_reservas.json", bloquear: bool = True):
     """Abre la ventana. Arrastra ahí los dos Excel y la vista se arma sola.
 
     El arrastrar y soltar necesita tkinterdnd2 (pip install tkinterdnd2); sin él
     la ventana funciona igual con el botón de elegir archivos.
+
+    En Jupyter, ejecuta antes «%gui tk» en una celda y llama
+    abrir_gui(..., bloquear=False): así la ventana vive sin dejar la celda
+    ocupada. Devuelve la ventana, por si quieres cerrarla con .destroy().
     """
     import tkinter as tk
     from tkinter import filedialog, messagebox, ttk
@@ -678,9 +682,15 @@ def abrir_gui(hist_ruta: str | Path = "historico_reservas.json") -> None:
         from tkinterdnd2 import DND_FILES, TkinterDnD
         root = TkinterDnD.Tk()
         arrastre = True
-    except Exception:
+    except ImportError:
         root = tk.Tk()
         arrastre = False
+    except tk.TclError as err:
+        raise SystemExit(
+            "No se pudo abrir una ventana: este Python no tiene pantalla a la mano "
+            f"({err}). Pasa a la línea de comandos con los archivos como argumentos, "
+            "o usa la versión web (reservas/index.html)."
+        ) from err
 
     PLUM, TEAL, TEAL2 = "#5B1A44", "#134E63", "#1B6C86"
     HIELO, HIELO2, LINEA = "#E9F1F6", "#F5F9FB", "#C9D8E1"
@@ -693,9 +703,11 @@ def abrir_gui(hist_ruta: str | Path = "historico_reservas.json") -> None:
     MONO = "Consolas" if "Consolas" in familias else "TkFixedFont"
 
     root.title("Reservas técnicas QES")
-    root.geometry("1320x900")
+    ancho = min(1320, root.winfo_screenwidth() - 60)
+    alto = min(900, root.winfo_screenheight() - 90)
+    root.geometry(f"{ancho}x{alto}+{max(0, (root.winfo_screenwidth() - ancho) // 2)}+20")
     root.configure(bg=FONDO)
-    root.minsize(900, 640)
+    root.minsize(760, 520)
 
     hist = Historico(hist_ruta)
     estado = {"seleccion": hist.periodos()[-3:], "escala": 1e6, "fx": 17.4986}
@@ -733,7 +745,7 @@ def abrir_gui(hist_ruta: str | Path = "historico_reservas.json") -> None:
         carga,
         text=("Arrastra aquí la balanza (.xlsx) y el archivo de actuarios (.xlsb)"
               if arrastre else "Elige la balanza (.xlsx) y el archivo de actuarios (.xlsb)"),
-        bg=HIELO2, fg=TEAL, font=(UI, 11, "bold"), height=4, relief="ridge", bd=1, cursor="hand2")
+        bg=HIELO2, fg=TEAL, font=(UI, 11, "bold"), height=2, relief="ridge", bd=1, cursor="hand2")
     zona.pack(fill="x", padx=14, pady=(14, 6))
 
     pie_zona = tk.Frame(carga, bg=PAPEL)
@@ -742,7 +754,7 @@ def abrir_gui(hist_ruta: str | Path = "historico_reservas.json") -> None:
                             "2205 riesgos en curso · 2301 siniestros reportados · 2302 no reportados (3er grado)",
              bg=PAPEL, fg=TINTA3, font=(UI, 8)).pack(side="left")
 
-    bitacora = tk.Text(carga, height=5, bg=PAPEL, fg=TINTA2, font=(MONO, 8),
+    bitacora = tk.Text(carga, height=3, bg=PAPEL, fg=TINTA2, font=(MONO, 8),
                        relief="flat", wrap="word", highlightbackground=LINEA, highlightthickness=1)
     bitacora.pack(fill="x", padx=14, pady=(0, 14))
     bitacora.tag_configure("err", foreground="#B04234")
@@ -750,13 +762,20 @@ def abrir_gui(hist_ruta: str | Path = "historico_reservas.json") -> None:
     bitacora.insert("end", "Sin archivos cargados en esta sesión.\n")
     bitacora.configure(state="disabled")
 
-    def apunta(texto: str, tag: str = "") -> None:
+    def apunta(texto: str, tag: str = "") -> None:  # noqa: D401
         bitacora.configure(state="normal")
         if bitacora.get("1.0", "end").strip() == "Sin archivos cargados en esta sesión.":
             bitacora.delete("1.0", "end")
         bitacora.insert("end", texto + "\n", tag)
         bitacora.see("end")
         bitacora.configure(state="disabled")
+
+    def reporta_error(tipo, valor, rastro) -> None:
+        import traceback
+        apunta("! " + "".join(traceback.format_exception_only(tipo, valor)).strip(), "err")
+        traceback.print_exception(tipo, valor, rastro)
+
+    root.report_callback_exception = reporta_error
 
     # ------------------------------------------------------------ controles
     ctl = tarjeta(cuerpo)
@@ -969,8 +988,8 @@ def abrir_gui(hist_ruta: str | Path = "historico_reservas.json") -> None:
             nuevos = [p for p in hist.periodos() if p not in estado["seleccion"]]
             if nuevos:
                 estado["seleccion"] = sorted(set(estado["seleccion"]) | {nuevos[-1]})[-4:]
-        if not estado["seleccion"]:
-            estado["seleccion"] = hist.periodos()[-3:]
+        if len(estado["seleccion"]) < 3:      # arranca mostrando los tres últimos cortes
+            estado["seleccion"] = sorted(set(estado["seleccion"]) | set(hist.periodos()[-3:]))[-4:]
         hist.guardar()
         dibuja()
 
@@ -1038,7 +1057,23 @@ def abrir_gui(hist_ruta: str | Path = "historico_reservas.json") -> None:
 
     dibuja()
     apunta(f"· histórico: {hist.ruta} ({len(hist.periodos())} periodo(s))")
-    root.mainloop()
+
+    # que no nazca detrás del navegador ni del notebook
+    root.update_idletasks()
+    root.deiconify()
+    root.lift()
+    root.attributes("-topmost", True)
+    root.after(800, lambda: root.attributes("-topmost", False))
+    try:
+        root.focus_force()
+    except tk.TclError:
+        pass
+
+    if bloquear:
+        root.mainloop()
+    else:
+        root.update()          # con «%gui tk» IPython se encarga del resto
+    return root
 
 
 # =========================================================================
