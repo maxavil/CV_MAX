@@ -679,17 +679,22 @@ def abrir_gui(hist_ruta: str | Path = "historico_reservas.json", bloquear: bool 
     from tkinter import filedialog, messagebox, ttk
 
     try:
-        from tkinterdnd2 import DND_FILES, TkinterDnD
-        root = TkinterDnD.Tk()
-        arrastre = True
-    except ImportError:
-        root = tk.Tk()
-        arrastre = False
+        try:
+            from tkinterdnd2 import DND_FILES, TkinterDnD
+            root = TkinterDnD.Tk()
+            arrastre = True
+        except ImportError:
+            root = tk.Tk()
+            arrastre = False
     except tk.TclError as err:
         raise SystemExit(
             "No se pudo abrir una ventana: este Python no tiene pantalla a la mano "
-            f"({err}). Pasa a la línea de comandos con los archivos como argumentos, "
-            "o usa la versión web (reservas/index.html)."
+            f"({err}).\n"
+            "Esto suele ocurrir cuando el kernel de Jupyter corre en un servidor, en WSL "
+            "o en un contenedor: ahí no hay escritorio donde dibujar.\n"
+            "Opciones: correr «python reservas_qes.py» desde el Anaconda Prompt de tu "
+            "propia máquina, usar Historico(...).vista() sin ventana, o abrir la versión "
+            "web (reservas/index.html) en el navegador."
         ) from err
 
     PLUM, TEAL, TEAL2 = "#5B1A44", "#134E63", "#1B6C86"
@@ -1059,15 +1064,17 @@ def abrir_gui(hist_ruta: str | Path = "historico_reservas.json", bloquear: bool 
     apunta(f"· histórico: {hist.ruta} ({len(hist.periodos())} periodo(s))")
 
     # que no nazca detrás del navegador ni del notebook
-    root.update_idletasks()
-    root.deiconify()
-    root.lift()
-    root.attributes("-topmost", True)
-    root.after(800, lambda: root.attributes("-topmost", False))
     try:
+        root.update_idletasks()
+        root.deiconify()
+        root.lift()
+        root.attributes("-topmost", True)
+        root.after(800, lambda: root.attributes("-topmost", False))
         root.focus_force()
     except tk.TclError:
         pass
+
+    print(f"Ventana abierta ({ancho}x{alto}). Ciérrala para liberar la celda.")
 
     if bloquear:
         root.mainloop()
@@ -1113,7 +1120,12 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-if __name__ == "__main__" and "ipykernel" not in sys.modules:
+if "ipykernel" in sys.modules:
     # dentro de Jupyter no se arranca la CLI: ahí argparse vería los argumentos
-    # del kernel ("-f <connection file>") y abortaría. Usa la clase Historico.
+    # del kernel ("-f <connection file>") y abortaría. La ventana se pide a mano.
+    print("Listo. Para abrir la ventana ejecuta en la siguiente celda:\n"
+          "    abrir_gui(r\"historico_reservas.json\")\n"
+          "Sin ventana: h = Historico(\"historico_reservas.json\"); "
+          "h.procesar(ruta); h.guardar(); print(h.vista())")
+elif __name__ == "__main__":
     raise SystemExit(main())
