@@ -447,6 +447,62 @@ class Historico:
             return None
         return e["cnsf"][cid] - e["local"][cid]
 
+    def mensajes(self, actual: str, previo: str | None) -> list[str]:
+        """Los tres mensajes clave, redactados con las cifras del propio corte."""
+        def mm(v: float) -> str:
+            return f"{v / 1e6:,.2f}"
+
+        d1 = self.diferencia(actual) or 0.0
+        if previo is None:
+            return [f"Al {etiqueta_periodo(actual)}, la diferencia entre metodologías asciende a USD {mm(d1)} MM.",
+                    "Agrega un periodo anterior al histórico para comparar la evolución del diferencial."]
+
+        d0 = self.diferencia(previo) or 0.0
+        v_local = self.total(actual, "local") - self.total(previo, "local")
+        v_cnsf = self.total(actual, "cnsf") - self.total(previo, "cnsf")
+        rango = f"Entre {etiqueta_corta(previo).lower()} y {etiqueta_corta(actual).lower()}"
+
+        motor = max(
+            ((c, self.datos[actual]["local"].get(c.id, 0.0) - self.datos[previo]["local"].get(c.id, 0.0))
+             for c in CONCEPTOS), key=lambda x: abs(x[1]), default=None)
+        m1 = (f"{rango}, las reservas bajo QES Metodología local "
+              f"{'aumentan' if v_local >= 0 else 'disminuyen'} USD {mm(abs(v_local))} MM")
+        if motor and abs(motor[1]) > 5000:
+            m1 += (f", principalmente por {'el incremento' if motor[1] >= 0 else 'la reducción'} "
+                   f"de USD {mm(abs(motor[1]))} MM en la {motor[0].label.replace('Reserva de ', 'reserva de ')}")
+        m1 += "."
+
+        sube, baja = [], []
+        for c in CONCEPTOS:
+            d = self.datos[actual]["cnsf"].get(c.id, 0.0) - self.datos[previo]["cnsf"].get(c.id, 0.0)
+            if abs(d) > 5000:
+                (sube if d > 0 else baja).append((c, abs(d)))
+
+        def lista(arr):
+            return " y de ".join(f"USD {mm(d)} MM en {c.label.replace('Reserva de ', '').lower()}" for c, d in arr)
+
+        m2 = (f"Bajo el Método Estatutario, las reservas totales "
+              f"{'aumentan' if v_cnsf >= 0 else 'disminuyen'} USD {mm(abs(v_cnsf))} MM.")
+        if sube and baja:
+            m2 += (f" El incremento de {lista(sube)} fue "
+                   f"{'parcialmente compensado' if v_cnsf >= 0 else 'más que compensado'} "
+                   f"por la disminución de {lista(baja)}.")
+        elif sube:
+            m2 += f" El movimiento se concentra en el incremento de {lista(sube)}."
+        elif baja:
+            m2 += f" El movimiento se concentra en la disminución de {lista(baja)}."
+
+        v = d1 - d0
+        m3 = ("El Método Estatutario mantiene una posición superior." if d1 >= 0
+              else "La Metodología local se mantiene por encima del Método Estatutario.")
+        m3 += (f" La diferencia total por constitución pasa de USD {mm(d0)} MM en {etiqueta_corta(previo).lower()}"
+               f" a USD {mm(d1)} MM en {etiqueta_corta(actual).lower()}, con "
+               f"{'un incremento' if v >= 0 else 'una disminución'} de USD {mm(abs(v))} MM")
+        if d0:
+            m3 += f" ({'+' if v >= 0 else '−'}{abs(v / d0 * 100):.1f}%)"
+        m3 += "."
+        return [m1, m2, m3]
+
     def vista(self, periodos: Iterable[str] | None = None, escala: float = 1e6) -> str:
         """La vista comparativa en texto: conceptos por periodo más el total."""
         ps = list(periodos) if periodos else self.periodos()[-3:]
@@ -490,7 +546,503 @@ class Historico:
 
 
 # =========================================================================
-# 7. Línea de comandos
+# 7. Exportar la vista a un Excel
+# =========================================================================
+
+
+def exportar_excel(hist: "Historico", destino: str | Path,
+                   periodos: Sequence[str] | None = None, escala: float = 1e6) -> Path:
+    """Escribe la vista comparativa en un .xlsx con el mismo acomodo de la foto."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
+    ps = list(periodos) if periodos else hist.periodos()[-3:]
+    if not ps:
+        raise ValueError("No hay periodos que exportar.")
+    previo = ps[-2] if len(ps) > 1 else None
+
+    plum = PatternFill("solid", fgColor="5B1A44")
+    teal = PatternFill("solid", fgColor="134E63")
+    teal2 = PatternFill("solid", fgColor="1B6C86")
+    hielo = PatternFill("solid", fgColor="F5F9FB")
+    blanco = Font(color="FFFFFF", bold=True)
+    centro = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    fino = Side(style="thin", color="C9D8E1")
+    borde = Border(left=fino, right=fino, top=fino, bottom=fino)
+    formato = "#,##0.00"
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Reservas QES"
+
+    ws["A1"] = "Resultados reservas técnicas QES"
+    ws["A1"].font = Font(size=16, bold=True, color="5B1A44")
+    ws["A2"] = "Comparativo de metodologías y evolución del diferencial"
+    ws["A2"].font = Font(size=11, color="4E6069")
+    ws["A3"] = ("Cifras en millones de USD" if escala == 1e6 else "Cifras en USD") + \
+               ". Diferencia = Método Estatutario CNSF − Metodología local."
+    ws["A3"].font = Font(size=9, italic=True, color="7B8C95")
+
+    fila_grupo, fila_sub, fila_ini = 5, 6, 7
+    ws.cell(fila_grupo, 1, "RESERVA")
+    ws.merge_cells(start_row=fila_grupo, start_column=1, end_row=fila_sub, end_column=1)
+
+    col = 2
+    for p in ps:
+        ws.cell(fila_grupo, col, etiqueta_periodo(p).capitalize())
+        ws.merge_cells(start_row=fila_grupo, start_column=col, end_row=fila_grupo, end_column=col + 2)
+        for k, txt in enumerate(("Metodología local", "CNSF Método Estatutario", "Diferencia")):
+            ws.cell(fila_sub, col + k, txt)
+        col += 3
+    if previo:
+        ws.cell(fila_grupo, col, f"Incremento respecto de {etiqueta_corta(previo)}")
+        ws.merge_cells(start_row=fila_grupo, start_column=col, end_row=fila_sub, end_column=col)
+
+    for fila in (fila_grupo, fila_sub):
+        for c in range(1, col + 1):
+            celda = ws.cell(fila, c)
+            celda.fill = plum if c == 1 else (teal if fila == fila_grupo else teal2)
+            celda.font = blanco
+            celda.alignment = centro
+            celda.border = borde
+
+    def escribe(fila: int, valor: float | None, columna: int, negrita: bool = False) -> None:
+        celda = ws.cell(fila, columna, None if valor is None else valor / escala)
+        celda.number_format = formato
+        celda.border = borde
+        if negrita:
+            celda.fill = teal
+            celda.font = blanco
+
+    fila = fila_ini
+    for i, c in enumerate(CONCEPTOS):
+        ws.cell(fila, 1, c.label).border = borde
+        col = 2
+        for p in ps:
+            escribe(fila, hist.datos[p]["local"].get(c.id), col)
+            escribe(fila, hist.datos[p]["cnsf"].get(c.id), col + 1)
+            escribe(fila, hist.diferencia(p, c.id), col + 2)
+            col += 3
+        if previo:
+            a, b = hist.diferencia(ps[-1], c.id), hist.diferencia(previo, c.id)
+            escribe(fila, a - b if a is not None and b is not None else None, col)
+        if i % 2:
+            for cc in range(1, col + 1):
+                ws.cell(fila, cc).fill = hielo
+        fila += 1
+
+    ws.cell(fila, 1, "TOTAL RESERVAS").font = blanco
+    ws.cell(fila, 1).fill = teal
+    ws.cell(fila, 1).border = borde
+    col = 2
+    for p in ps:
+        escribe(fila, hist.total(p, "local"), col, True)
+        escribe(fila, hist.total(p, "cnsf"), col + 1, True)
+        escribe(fila, hist.diferencia(p), col + 2, True)
+        col += 3
+    if previo:
+        escribe(fila, (hist.diferencia(ps[-1]) or 0) - (hist.diferencia(previo) or 0), col, True)
+
+    fila += 2
+    for m in hist.mensajes(ps[-1], previo):
+        ws.cell(fila, 1, "• " + m).font = Font(size=9, color="16252D")
+        ws.merge_cells(start_row=fila, start_column=1, end_row=fila, end_column=max(col, 4))
+        fila += 1
+
+    ws.column_dimensions["A"].width = 38
+    for i in range(2, col + 1):
+        ws.column_dimensions[ws.cell(1, i).column_letter].width = 15
+    ws.row_dimensions[fila_sub].height = 32
+    ws.freeze_panes = ws.cell(fila_ini, 2)
+
+    destino = Path(destino)
+    wb.save(destino)
+    return destino
+
+
+# =========================================================================
+# 8. Ventana: arrastrar los Excel y ver la vista
+# =========================================================================
+
+
+def abrir_gui(hist_ruta: str | Path = "historico_reservas.json") -> None:
+    """Abre la ventana. Arrastra ahí los dos Excel y la vista se arma sola.
+
+    El arrastrar y soltar necesita tkinterdnd2 (pip install tkinterdnd2); sin él
+    la ventana funciona igual con el botón de elegir archivos.
+    """
+    import tkinter as tk
+    from tkinter import filedialog, messagebox, ttk
+
+    try:
+        from tkinterdnd2 import DND_FILES, TkinterDnD
+        root = TkinterDnD.Tk()
+        arrastre = True
+    except Exception:
+        root = tk.Tk()
+        arrastre = False
+
+    PLUM, TEAL, TEAL2 = "#5B1A44", "#134E63", "#1B6C86"
+    HIELO, HIELO2, LINEA = "#E9F1F6", "#F5F9FB", "#C9D8E1"
+    TINTA, TINTA2, TINTA3 = "#16252D", "#4E6069", "#7B8C95"
+    FONDO, PAPEL = "#EFF3F6", "#FFFFFF"
+
+    import tkinter.font as tkfont
+    familias = set(tkfont.families(root))
+    UI = "Segoe UI" if "Segoe UI" in familias else ("Helvetica" if "Helvetica" in familias else "TkDefaultFont")
+    MONO = "Consolas" if "Consolas" in familias else "TkFixedFont"
+
+    root.title("Reservas técnicas QES")
+    root.geometry("1320x900")
+    root.configure(bg=FONDO)
+    root.minsize(900, 640)
+
+    hist = Historico(hist_ruta)
+    estado = {"seleccion": hist.periodos()[-3:], "escala": 1e6, "fx": 17.4986}
+
+    lienzo = tk.Canvas(root, bg=FONDO, highlightthickness=0)
+    barra = ttk.Scrollbar(root, orient="vertical", command=lienzo.yview)
+    cuerpo = tk.Frame(lienzo, bg=FONDO)
+    cuerpo.bind("<Configure>", lambda e: lienzo.configure(scrollregion=lienzo.bbox("all")))
+    ventana_id = lienzo.create_window((0, 0), window=cuerpo, anchor="nw")
+    lienzo.bind("<Configure>", lambda e: lienzo.itemconfigure(ventana_id, width=e.width))
+    lienzo.configure(yscrollcommand=barra.set)
+    lienzo.pack(side="left", fill="both", expand=True)
+    barra.pack(side="right", fill="y")
+    root.bind_all("<MouseWheel>", lambda e: lienzo.yview_scroll(int(-e.delta / 120), "units"))
+    root.bind_all("<Button-4>", lambda e: lienzo.yview_scroll(-1, "units"))
+    root.bind_all("<Button-5>", lambda e: lienzo.yview_scroll(1, "units"))
+
+    def tarjeta(padre) -> tk.Frame:
+        marco = tk.Frame(padre, bg=PAPEL, highlightbackground=LINEA, highlightthickness=1)
+        marco.pack(fill="x", padx=16, pady=8)
+        return marco
+
+    # ------------------------------------------------------------ encabezado
+    cab = tk.Frame(cuerpo, bg=FONDO)
+    cab.pack(fill="x", padx=16, pady=(14, 0))
+    tk.Label(cab, text="RESERVAS TÉCNICAS QES", bg=FONDO, fg=PLUM,
+             font=(UI, 17, "bold")).pack(anchor="w")
+    tk.Label(cab, text="Metodología local (balanza contable) contra Método Estatutario CNSF, "
+                       "con histórico acumulado por periodo.",
+             bg=FONDO, fg=TINTA2, font=(UI, 9)).pack(anchor="w")
+
+    # ------------------------------------------------------------ zona de carga
+    carga = tarjeta(cuerpo)
+    zona = tk.Label(
+        carga,
+        text=("Arrastra aquí la balanza (.xlsx) y el archivo de actuarios (.xlsb)"
+              if arrastre else "Elige la balanza (.xlsx) y el archivo de actuarios (.xlsb)"),
+        bg=HIELO2, fg=TEAL, font=(UI, 11, "bold"), height=4, relief="ridge", bd=1, cursor="hand2")
+    zona.pack(fill="x", padx=14, pady=(14, 6))
+
+    pie_zona = tk.Frame(carga, bg=PAPEL)
+    pie_zona.pack(fill="x", padx=14, pady=(0, 10))
+    tk.Label(pie_zona, text="El origen de cada archivo se detecta solo · "
+                            "2205 riesgos en curso · 2301 siniestros reportados · 2302 no reportados (3er grado)",
+             bg=PAPEL, fg=TINTA3, font=(UI, 8)).pack(side="left")
+
+    bitacora = tk.Text(carga, height=5, bg=PAPEL, fg=TINTA2, font=(MONO, 8),
+                       relief="flat", wrap="word", highlightbackground=LINEA, highlightthickness=1)
+    bitacora.pack(fill="x", padx=14, pady=(0, 14))
+    bitacora.tag_configure("err", foreground="#B04234")
+    bitacora.tag_configure("warn", foreground="#9C6A0E")
+    bitacora.insert("end", "Sin archivos cargados en esta sesión.\n")
+    bitacora.configure(state="disabled")
+
+    def apunta(texto: str, tag: str = "") -> None:
+        bitacora.configure(state="normal")
+        if bitacora.get("1.0", "end").strip() == "Sin archivos cargados en esta sesión.":
+            bitacora.delete("1.0", "end")
+        bitacora.insert("end", texto + "\n", tag)
+        bitacora.see("end")
+        bitacora.configure(state="disabled")
+
+    # ------------------------------------------------------------ controles
+    ctl = tarjeta(cuerpo)
+    fila_ctl = tk.Frame(ctl, bg=PAPEL)
+    fila_ctl.pack(fill="x", padx=14, pady=12)
+    tk.Label(fila_ctl, text="PERIODOS EN LA VISTA", bg=PAPEL, fg=TINTA3,
+             font=(UI, 8, "bold")).grid(row=0, column=0, sticky="w")
+    chips = tk.Frame(fila_ctl, bg=PAPEL)
+    chips.grid(row=1, column=0, sticky="w", pady=(4, 0))
+
+    tk.Label(fila_ctl, text="UNIDADES", bg=PAPEL, fg=TINTA3,
+             font=(UI, 8, "bold")).grid(row=0, column=1, sticky="w", padx=(28, 0))
+    unidad_var = tk.StringVar(value="Millones de USD")
+    combo = ttk.Combobox(fila_ctl, textvariable=unidad_var, state="readonly", width=18,
+                         values=("Millones de USD", "USD", "Millones de MXN"))
+    combo.grid(row=1, column=1, sticky="w", padx=(28, 0), pady=(4, 0))
+
+    tk.Label(fila_ctl, text="TIPO DE CAMBIO MXN/USD", bg=PAPEL, fg=TINTA3,
+             font=(UI, 8, "bold")).grid(row=0, column=2, sticky="w", padx=(20, 0))
+    fx_var = tk.StringVar(value="17.4986")
+    tk.Entry(fila_ctl, textvariable=fx_var, width=10, font=(MONO, 9)).grid(
+        row=1, column=2, sticky="w", padx=(20, 0), pady=(4, 0))
+
+    botones = tk.Frame(fila_ctl, bg=PAPEL)
+    botones.grid(row=1, column=3, sticky="e", padx=(24, 0))
+    fila_ctl.columnconfigure(3, weight=1)
+
+    # ------------------------------------------------------------ tablero
+    kpis = tarjeta(cuerpo)
+    tabla = tarjeta(cuerpo)
+    claves = tarjeta(cuerpo)
+
+    def limpia(marco: tk.Frame) -> None:
+        for hijo in marco.winfo_children():
+            hijo.destroy()
+
+    def escala_valor(v: float) -> float:
+        if estado["escala"] == 1.0:
+            return v
+        if estado["escala"] == "mxn":
+            return v * estado["fx"] / 1e6
+        return v / 1e6
+
+    def texto_valor(v: float | None) -> str:
+        if v is None:
+            return "n/d"
+        e = escala_valor(v)
+        return "—" if abs(e) < 0.005 else f"{e:,.2f}"
+
+    def mm(v: float) -> str:
+        return f"{v / 1e6:,.2f}"
+
+    # ------------------------------------------------------------ pintado
+    def dibuja() -> None:
+        ps = sorted(estado["seleccion"])
+        actual = ps[-1] if ps else None
+        previo = ps[-2] if len(ps) > 1 else None
+
+        # chips de periodos
+        limpia(chips)
+        if not hist.periodos():
+            tk.Label(chips, text="Sin periodos en el histórico", bg=PAPEL, fg=TINTA3,
+                     font=(UI, 9)).pack(side="left")
+        for p in hist.periodos():
+            var = tk.BooleanVar(value=p in ps)
+
+            def alterna(p=p, var=var):
+                if var.get():
+                    estado["seleccion"] = sorted(set(estado["seleccion"]) | {p})
+                else:
+                    estado["seleccion"] = [x for x in estado["seleccion"] if x != p] or [p]
+                dibuja()
+
+            tk.Checkbutton(chips, text=etiqueta_periodo(p), variable=var, command=alterna,
+                           bg=PAPEL, fg=TINTA, activebackground=PAPEL, font=(UI, 9),
+                           selectcolor=PAPEL).pack(side="left", padx=(0, 10))
+
+        # indicadores
+        limpia(kpis)
+        caja = tk.Frame(kpis, bg=PAPEL)
+        caja.pack(fill="x", padx=14, pady=12)
+        if actual is None:
+            tk.Label(caja, text="Carga un archivo para ver los indicadores.",
+                     bg=PAPEL, fg=TINTA2, font=(UI, 10)).pack(anchor="w")
+        else:
+            d1 = hist.diferencia(actual) or 0.0
+            tarjetas = [("DIFERENCIA TOTAL", etiqueta_corta(actual),
+                         f"USD {mm(d1)} MM", f"~MXN {mm(d1 * estado['fx'])} MM", TEAL, HIELO2)]
+            if previo:
+                d0 = hist.diferencia(previo) or 0.0
+                v = d1 - d0
+                tarjetas.append(("VARIACIÓN DEL PERIODO", f"{etiqueta_corta(previo)} → {etiqueta_corta(actual)}",
+                                 f"{'+' if v >= 0 else '−'}USD {mm(abs(v))} MM",
+                                 f"~MXN {mm(abs(v) * estado['fx'])} MM", PLUM, "#FBF1F7"))
+                pct = f"{'+' if v >= 0 else '−'}{abs(v / d0 * 100):.1f}%" if d0 else "n/d"
+                tarjetas.append(("VARIACIÓN % DE LA DIFERENCIA",
+                                 f"{etiqueta_corta(previo)} → {etiqueta_corta(actual)}",
+                                 pct, f"sobre USD {mm(d0)} MM", TEAL, HIELO2))
+            for i, (etq, alcance, valor, alt, color, fondo) in enumerate(tarjetas):
+                t = tk.Frame(caja, bg=fondo, highlightbackground=LINEA, highlightthickness=1)
+                t.grid(row=0, column=i, sticky="ew", padx=(0 if i == 0 else 10, 0))
+                caja.columnconfigure(i, weight=1)
+                tk.Label(t, text=etq, bg=fondo, fg=color, font=(UI, 8, "bold")).pack(anchor="w", padx=12, pady=(8, 0))
+                tk.Label(t, text=alcance, bg=fondo, fg=TINTA3, font=(UI, 8)).pack(anchor="w", padx=12)
+                tk.Label(t, text=valor, bg=fondo, fg=color, font=(UI, 19, "bold")).pack(anchor="w", padx=12)
+                tk.Label(t, text=alt, bg=fondo, fg=TINTA3, font=(MONO, 8)).pack(anchor="w", padx=12, pady=(0, 8))
+
+        # matriz
+        limpia(tabla)
+        envoltura = tk.Frame(tabla, bg=PAPEL)
+        envoltura.pack(fill="x", padx=14, pady=(14, 6))
+        lienzo_t = tk.Canvas(envoltura, bg=PAPEL, highlightthickness=0)
+        barra_h = ttk.Scrollbar(envoltura, orient="horizontal", command=lienzo_t.xview)
+        lienzo_t.configure(xscrollcommand=barra_h.set)
+        lienzo_t.pack(side="top", fill="x")
+        barra_h.pack(side="bottom", fill="x")
+        rejilla = tk.Frame(lienzo_t, bg=LINEA)
+        lienzo_t.create_window((0, 0), window=rejilla, anchor="nw")
+
+        def ajusta(_evento=None):
+            lienzo_t.configure(scrollregion=lienzo_t.bbox("all"),
+                               height=rejilla.winfo_reqheight())
+
+        rejilla.bind("<Configure>", ajusta)
+        if not ps:
+            tk.Label(rejilla, text="Selecciona al menos un periodo.", bg=PAPEL, fg=TINTA2,
+                     font=(UI, 10)).grid(row=0, column=0, sticky="w")
+        else:
+            def celda(r, c, texto, **kw):
+                lab = tk.Label(rejilla, text=texto, bg=kw.get("bg", PAPEL), fg=kw.get("fg", TINTA),
+                               font=kw.get("font", (UI, 9)), anchor=kw.get("anchor", "e"),
+                               padx=8, pady=5, wraplength=kw.get("wrap", 0), justify="center")
+                lab.grid(row=r, column=c, sticky="nsew", padx=(0, 1), pady=(0, 1),
+                         columnspan=kw.get("cs", 1), rowspan=kw.get("rs", 1))
+                return lab
+
+            celda(0, 0, "RESERVA", bg=PLUM, fg="white", font=(UI, 11, "bold"), anchor="w", rs=2)
+            col = 1
+            for p in ps:
+                celda(0, col, etiqueta_periodo(p).capitalize(), bg=TEAL, fg="white",
+                      font=(UI, 10, "bold"), anchor="center", cs=3)
+                for k, txt in enumerate(("Metodología\nlocal", "CNSF\nMétodo Estatutario", "Diferencia\n(estat. − local)")):
+                    celda(1, col + k, txt, bg=TEAL2, fg="white", font=(UI, 8), anchor="center", wrap=110)
+                col += 3
+            if previo:
+                celda(0, col, f"Incremento\nrespecto de\n{etiqueta_corta(previo)}", bg=TEAL, fg="white",
+                      font=(UI, 8, "bold"), anchor="center", rs=2, wrap=100)
+
+            for i, c in enumerate(CONCEPTOS):
+                fondo = PAPEL if i % 2 == 0 else HIELO2
+                r = 2 + i
+                celda(r, 0, c.label, bg=fondo, anchor="w")
+                col = 1
+                for p in ps:
+                    celda(r, col, texto_valor(hist.datos[p]["local"].get(c.id)), bg=fondo, font=(MONO, 9))
+                    celda(r, col + 1, texto_valor(hist.datos[p]["cnsf"].get(c.id)), bg=fondo, font=(MONO, 9))
+                    celda(r, col + 2, texto_valor(hist.diferencia(p, c.id)), bg=fondo, fg=PLUM, font=(MONO, 9))
+                    col += 3
+                if previo:
+                    a, b = hist.diferencia(ps[-1], c.id), hist.diferencia(previo, c.id)
+                    celda(r, col, texto_valor(a - b if a is not None and b is not None else None),
+                          bg=fondo, fg=TEAL, font=(MONO, 9))
+
+            r = 2 + len(CONCEPTOS)
+            celda(r, 0, "TOTAL RESERVAS", bg=TEAL, fg="white", font=(UI, 10, "bold"), anchor="w")
+            col = 1
+            for p in ps:
+                celda(r, col, texto_valor(hist.total(p, "local")), bg=TEAL, fg="white", font=(MONO, 9, "bold"))
+                celda(r, col + 1, texto_valor(hist.total(p, "cnsf")), bg=TEAL, fg="white", font=(MONO, 9, "bold"))
+                celda(r, col + 2, texto_valor(hist.diferencia(p)), bg=TEAL, fg="white", font=(MONO, 9, "bold"))
+                col += 3
+            if previo:
+                celda(r, col, texto_valor((hist.diferencia(ps[-1]) or 0) - (hist.diferencia(previo) or 0)),
+                      bg=TEAL, fg="white", font=(MONO, 9, "bold"))
+            rejilla.columnconfigure(0, minsize=250)
+            for c in range(1, col + 1):
+                rejilla.columnconfigure(c, minsize=96)
+        ajusta()
+
+        unidad = {1.0: "USD", "mxn": "millones de MXN"}.get(estado["escala"], "millones de USD")
+        tk.Label(tabla, text=f"Cifras en {unidad}. La diferencia es Método Estatutario CNSF menos Metodología "
+                             "local, es decir el exceso de constitución del método estatutario.",
+                 bg=PAPEL, fg=TINTA2, font=(UI, 8), anchor="w", justify="left").pack(
+            fill="x", padx=14, pady=(0, 12))
+
+        # mensajes clave
+        limpia(claves)
+        tk.Label(claves, text="MENSAJES CLAVE", bg=PAPEL, fg=TEAL2, font=(UI, 8, "bold")).pack(
+            anchor="w", padx=14, pady=(12, 4))
+        if actual is None:
+            tk.Label(claves, text="Carga los dos archivos para redactar los mensajes.",
+                     bg=PAPEL, fg=TINTA2, font=(UI, 9)).pack(anchor="w", padx=14, pady=(0, 12))
+        else:
+            for m in hist.mensajes(actual, previo):
+                tk.Label(claves, text="•  " + m, bg=PAPEL, fg=TINTA, font=(UI, 9),
+                         wraplength=1120, justify="left", anchor="w").pack(fill="x", padx=14, pady=(0, 6))
+            tk.Label(claves, text="", bg=PAPEL).pack(pady=(0, 6))
+
+    # ------------------------------------------------------------ acciones
+    def carga_rutas(rutas: Iterable[str]) -> None:
+        for ruta in rutas:
+            if not str(ruta).strip():
+                continue
+            try:
+                for aviso in hist.procesar(ruta):
+                    apunta("· " + aviso, "warn" if "Revisar" in aviso or "SIN CUENTA" in aviso else "")
+            except Exception as err:  # noqa: BLE001 - se reporta en la bitácora
+                apunta("! " + str(err), "err")
+                continue
+            nuevos = [p for p in hist.periodos() if p not in estado["seleccion"]]
+            if nuevos:
+                estado["seleccion"] = sorted(set(estado["seleccion"]) | {nuevos[-1]})[-4:]
+        if not estado["seleccion"]:
+            estado["seleccion"] = hist.periodos()[-3:]
+        hist.guardar()
+        dibuja()
+
+    def elegir() -> None:
+        rutas = filedialog.askopenfilenames(
+            title="Elige la balanza y el archivo de actuarios",
+            filetypes=[("Excel", "*.xlsx *.xlsm *.xlsb"), ("Todos", "*.*")])
+        if rutas:
+            carga_rutas(rutas)
+
+    zona.bind("<Button-1>", lambda e: elegir())
+    if arrastre:
+        zona.drop_target_register(DND_FILES)
+        zona.dnd_bind("<<Drop>>", lambda e: carga_rutas(root.tk.splitlist(e.data)))
+        zona.dnd_bind("<<DragEnter>>", lambda e: zona.configure(bg=HIELO))
+        zona.dnd_bind("<<DragLeave>>", lambda e: zona.configure(bg=HIELO2))
+    else:
+        tk.Label(pie_zona, text="  (instala tkinterdnd2 para arrastrar y soltar)",
+                 bg=PAPEL, fg="#9C6A0E", font=(UI, 8)).pack(side="left")
+
+    def cambia_unidad(_evento=None) -> None:
+        estado["escala"] = {"Millones de USD": 1e6, "USD": 1.0, "Millones de MXN": "mxn"}[unidad_var.get()]
+        dibuja()
+
+    def cambia_fx(*_args) -> None:
+        try:
+            v = float(fx_var.get().replace(",", ""))
+            if v > 0:
+                estado["fx"] = v
+                dibuja()
+        except ValueError:
+            pass
+
+    combo.bind("<<ComboboxSelected>>", cambia_unidad)
+    fx_var.trace_add("write", cambia_fx)
+
+    def exporta() -> None:
+        if not estado["seleccion"]:
+            messagebox.showinfo("Reservas QES", "No hay periodos que exportar.")
+            return
+        destino = filedialog.asksaveasfilename(
+            defaultextension=".xlsx", initialfile="Vista_reservas_QES.xlsx",
+            filetypes=[("Excel", "*.xlsx")])
+        if not destino:
+            return
+        try:
+            ruta = exportar_excel(hist, destino, sorted(estado["seleccion"]),
+                                  escala=1e6 if estado["escala"] == "mxn" else estado["escala"])
+            apunta(f"· vista exportada a {ruta}")
+            messagebox.showinfo("Reservas QES", f"Vista exportada:\n{ruta}")
+        except Exception as err:  # noqa: BLE001
+            messagebox.showerror("Reservas QES", str(err))
+
+    def vacia() -> None:
+        if messagebox.askyesno("Reservas QES", "¿Vaciar todo el histórico guardado?"):
+            hist.datos.clear()
+            estado["seleccion"] = []
+            hist.guardar()
+            apunta("· histórico vaciado")
+            dibuja()
+
+    ttk.Button(botones, text="Elegir archivos", command=elegir).pack(side="left", padx=(0, 6))
+    ttk.Button(botones, text="Exportar vista a Excel", command=exporta).pack(side="left", padx=(0, 6))
+    ttk.Button(botones, text="Vaciar histórico", command=vacia).pack(side="left")
+
+    dibuja()
+    apunta(f"· histórico: {hist.ruta} ({len(hist.periodos())} periodo(s))")
+    root.mainloop()
+
+
+# =========================================================================
+# 9. Línea de comandos
 # =========================================================================
 
 
@@ -500,7 +1052,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--hist", default="historico_reservas.json", help="JSON donde vive el histórico acumulado.")
     ap.add_argument("--periodos", nargs="*", help="Periodos a mostrar (AAAA-MM-DD). Por omisión, los tres últimos.")
     ap.add_argument("--usd", action="store_true", help="Mostrar en USD en vez de millones.")
+    ap.add_argument("--gui", action="store_true", help="Abrir la ventana (es lo que pasa si no das archivos).")
+    ap.add_argument("--excel", help="Escribir la vista en este .xlsx además de imprimirla.")
     args = ap.parse_args(argv)
+
+    if args.gui or not args.archivos:
+        abrir_gui(args.hist)
+        return 0
 
     hist = Historico(args.hist)
     for ruta in args.archivos:
@@ -515,6 +1073,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"· histórico guardado en {hist.ruta} ({len(hist.periodos())} periodo(s))\n", file=sys.stderr)
 
     print(hist.vista(args.periodos, escala=1.0 if args.usd else 1e6))
+    if args.excel:
+        print(f"· vista exportada a {exportar_excel(hist, args.excel, args.periodos)}", file=sys.stderr)
     return 0
 
 

@@ -73,3 +73,11 @@ h.procesar("ResultadosQES.xlsb")      # carga todos los cortes que traiga
 h.guardar()
 print(h.vista())                      # o h.diferencia("2026-06-30")
 ```
+
+### Ventana (arrastrar y soltar)
+
+`python reservas/reservas_qes.py` sin argumentos abre una ventana Tkinter: se sueltan
+ahí los dos Excel y la vista se arma sola (indicadores, matriz por periodo, mensajes
+clave), con selector de periodos, unidades, tipo de cambio y exportación a `.xlsx`.
+El arrastrar y soltar necesita `pip install tkinterdnd2`; sin esa librería la ventana
+funciona igual con el botón «Elegir archivos». Desde un notebook: `abrir_gui("historico.json")`.
