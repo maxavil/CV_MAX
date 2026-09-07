@@ -243,6 +243,73 @@ def main(argv):
     if ev.index('class="tip t0') < ev.rindex('class="col c'):
         fallos.append("los globos se dibujan antes que las columnas y quedan tapados")
 
+    # ---- 8. las dos monedas ---------------------------------------------
+    TC = {"2025-12-31": 17.8410, "2026-03-31": 17.6220, "2026-06-30": 17.4986}
+    for per, v in TC.items():
+        h.poner_fx(per, v)
+    igual("el TC de cierre se guarda", h.fx("2026-06-30"), 17.4986, 1e-9)
+    igual("sin TC propio se usa el general", h.fx("2025-07-31", 19.0), 19.0, 1e-9)
+    h.poner_fx("2026-06-30", None)
+    igual("se puede borrar el TC de un corte", h.fx("2026-06-30", 19.0), 19.0, 1e-9)
+    h.poner_fx("2026-06-30", 17.4986)
+
+    ruta2 = escribir_vista(h, destino=tmp / "moneda.html", periodos=ps, abrir=False)
+    doc2 = ruta2.read_text(encoding="utf-8")
+    for cadena in ('id="m-usd"', 'id="m-mxn"', 'label for="m-mxn"', 'class="v-usd"',
+                   'class="v-mxn"', "Dólares", "Pesos", "Tipo de cambio de cierre"):
+        pruebas += 1
+        if cadena not in doc2:
+            fallos.append(f"al interruptor de moneda le falta «{cadena}»")
+    for prohibido in ("<script", "http://", "https://"):
+        pruebas += 1
+        if prohibido in doc2:
+            fallos.append(f"el interruptor metió algo externo: «{prohibido}»")
+
+    # cada corte convertido con SU tipo de cambio
+    import re as _re
+    total = _re.search(r'<tr class="total"><th>Total reservas</th>(.*?)</tr>', doc2, _re.S).group(1)
+    usd = [x for x in _re.findall(r'v-usd">([^<]*)', total)]
+    mxn = [x for x in _re.findall(r'v-mxn">([^<]*)', total)]
+    igual("celdas en dólares de la fila total", len(usd), 10, 0)
+    igual("celdas en pesos de la fila total", len(mxn), 10, 0)
+    esperado_mxn = []
+    for per in ps:
+        for lado in ("local", "cnsf", None):
+            v = h.total(per, lado) if lado else h.diferencia(per)
+            esperado_mxn.append(v * TC[per] / 1e6)
+    da = h.diferencia(ps[-1]) * TC[ps[-1]] - h.diferencia(ps[-2]) * TC[ps[-2]]
+    esperado_mxn.append(da / 1e6)
+    for i, (txt, esp) in enumerate(zip(mxn, esperado_mxn)):
+        igual(f"fila total en pesos, celda {i}", float(txt.replace(",", "")), esp, 0.005)
+
+    # el KPI y el mensaje clave no pueden contradecirse
+    v_usd = (h.diferencia("2026-06-30") - h.diferencia("2026-03-31")) / 1e6
+    v_mxn = (h.diferencia("2026-06-30") * TC["2026-06-30"]
+             - h.diferencia("2026-03-31") * TC["2026-03-31"]) / 1e6
+    igual("variación en pesos con el TC de cada cierre", v_mxn, 6.88, 0.005)
+    igual("variación en dólares", v_usd, 0.42, 0.005)
+    msg_usd = h.mensajes("2026-06-30", "2026-03-31")[2]
+    msg_mxn = h.mensajes("2026-06-30", "2026-03-31", fx=TC["2026-06-30"],
+                         fx_previo=TC["2026-03-31"])[2]
+    for etq, msg, cifra in (("dólares", msg_usd, f"USD {v_usd:,.2f} MM"),
+                            ("pesos", msg_mxn, f"MXN {v_mxn:,.2f} MM")):
+        pruebas += 1
+        if cifra not in msg:
+            fallos.append(f"el mensaje en {etq} no dice «{cifra}»: {msg[-130:]!r}")
+    pruebas += 1
+    if "+9.5%" not in msg_mxn:
+        fallos.append(f"el porcentaje en pesos debería ser +9.5%: {msg_mxn[-90:]!r}")
+
+    # los gráficos también traen las dos monedas
+    pruebas += 1
+    if 'class="v-mxn" x=' not in doc2:
+        fallos.append("la cascada no trae las etiquetas en pesos")
+    ev2 = escribir_evolucion(h, destino=tmp / "ev2.html", abrir=False).read_text(encoding="utf-8")
+    for cadena in ('id="m-mxn"', "MM MXN", 'class="v-mxn"'):
+        pruebas += 1
+        if cadena not in ev2:
+            fallos.append(f"la evolución no trae «{cadena}»")
+
     print(f"{pruebas} comprobaciones · {len(fallos)} fallo(s)")
     if fallos:
         for f in fallos:

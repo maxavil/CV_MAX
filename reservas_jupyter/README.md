@@ -26,7 +26,9 @@ reservas_jupyter/
    muestra qué leyó de cada uno antes de procesar nada.
 4. **Conectar** al servidor de auditoría, **Crear tablas** (solo la primera vez)
    y **Subir al servidor** para dejar la copia del mes.
-5. Elige las tres tablas de la vista en los desplegables: *Diciembre · t-1 · t*.
+5. Elige las tres tablas de la vista en los desplegables: *Diciembre · t-1 · t*,
+   y el tipo de cambio de cierre de cada una. Si quieres más columnas, marca los
+   cortes adicionales de abajo.
 6. Pica **Procesar**. Se escribe `vista_reservas_AAAA-MM-DD.html` junto al
    notebook y se abre en el navegador. **Ver evolución** escribe
    `evolucion_diferencia.html` con la diferencia mes con mes.
@@ -105,11 +107,29 @@ Servidor y base se editan en la propia ventana. Hace falta `pip install sqlalche
 
 Los desplegables listan cada copia subida —`mes · fuente · archivo · usuario · #carga`—
 y el usuario decide cuál va en cada columna: **1 Diciembre**, **2 t-1**, **3 t**.
+Debajo, las casillas de **cortes adicionales** permiten llevar a la vista cualquier
+otro mes del histórico; se acomodan por fecha.
 Por omisión se proponen el diciembre más reciente, el último corte y el anterior.
 La columna local sale de la carga elegida (la balanza, si la hay) y la estatutaria
 de la carga de actuarios más nueva de ese corte; el pie del HTML dice de qué carga
 salió cada una. Sin servidor conectado, los desplegables muestran los cortes del
 histórico local y todo sigue funcionando igual.
+
+### Dólares o pesos, con un botón
+
+Las dos vistas traen arriba un interruptor **Dólares / Pesos**. El HTML guarda
+las cifras en las dos monedas y el CSS enseña la que el lector eligió, así que
+sigue sin una línea de JavaScript y se puede mandar por correo tal cual.
+
+Cada corte se convierte con **su propio** tipo de cambio de cierre —diciembre al
+de diciembre, no al de hoy—, que se escribe junto a cada columna en la ventana y
+viaja con el histórico. El que se deje en blanco usa el tipo de cambio general.
+
+Por eso la variación en pesos no es la variación en dólares multiplicada: lleva
+dentro el efecto cambiario. Con 17.6220 al cierre de marzo y 17.4986 al de junio,
+la diferencia total sube USD 0.42 MM (+10.3 %) pero MXN 6.88 MM (+9.5 %). Los
+indicadores, la matriz, la cascada y los mensajes clave usan todos ese mismo
+criterio, para que ninguna parte de la hoja contradiga a otra.
 
 ### Evolución de la diferencia
 
@@ -122,12 +142,14 @@ el color nunca sea la única pista.
 
 ## Comprobación
 
-`verificar.py` ejecuta el bloque sin abrir ventana y contrasta 146 cifras contra
+`verificar.py` ejecuta el bloque sin abrir ventana y contrasta 181 cifras contra
 los valores de control del cierre de junio 2026: los seis cortes concepto por
 concepto, la vista en millones, los indicadores, la estructura del HTML, el ida y
 vuelta completo por la base de datos (contra un SQLite, con el mismo código que
-corre en SQL Server) y la página de evolución. Además vuelve a cargar la balanza
-para confirmar que el histórico conserva los cortes anteriores.
+corre en SQL Server), la página de evolución y el interruptor de moneda —celda por
+celda, con el tipo de cambio de cada cierre, y comprobando que el indicador y el
+mensaje clave digan la misma variación—. Además vuelve a cargar la balanza para
+confirmar que el histórico conserva los cortes anteriores.
 
 ```
 python verificar.py ruta/Balanza_062026.xlsx ruta/ResultadosQES.xlsb
