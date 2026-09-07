@@ -789,6 +789,53 @@ class Historico:
 #     DRIVER={ODBC Driver 17 for SQL Server};SERVER=...;DATABASE=...;Trusted_Connection=yes
 
 
+def drivers_odbc() -> "list[str]":
+    """Los drivers de SQL Server instalados en este equipo."""
+    try:
+        import pyodbc
+    except ImportError:
+        return []
+    try:
+        return [d for d in pyodbc.drivers() if "SQL Server" in d]
+    except Exception:
+        return []
+
+
+def elegir_driver(preferido: str = DRIVER) -> str:
+    """El mejor driver disponible.
+
+    En una máquina puede estar el 18 y no el 17, o sólo el Native Client. Sin
+    esto la conexión falla con un error que no dice nada útil.
+    """
+    disponibles = drivers_odbc()
+    if not disponibles or preferido in disponibles:
+        return preferido
+    numerados = sorted(
+        (d for d in disponibles if re.search(r"ODBC Driver (\d+)", d)),
+        key=lambda d: int(re.search(r"ODBC Driver (\d+)", d).group(1)),
+        reverse=True)
+    return numerados[0] if numerados else disponibles[0]
+
+
+def diagnostico() -> "list[str]":
+    """Qué hay y qué falta en este equipo, antes de pelearse con el servidor."""
+    out = [f"Python {sys.version.split()[0]}"]
+    for mod, para in (("openpyxl", "leer .xlsx"), ("pyxlsb", "leer .xlsb"),
+                      ("sqlalchemy", "hablar con el servidor"),
+                      ("pyodbc", "el driver de SQL Server"),
+                      ("tkinterdnd2", "arrastrar y soltar (opcional)")):
+        try:
+            __import__(mod)
+            out.append(f"{mod}: sí ({para})")
+        except ImportError:
+            out.append(f"{mod}: FALTA · pip install {mod} — {para}")
+    ds = drivers_odbc()
+    out.append("drivers ODBC: " + (", ".join(ds) if ds else "ninguno encontrado"))
+    if ds:
+        out.append(f"se usará: {elegir_driver()}")
+    return out
+
+
 class Repositorio:
     """Lectura y escritura de las tablas en el servidor.
 
@@ -798,9 +845,10 @@ class Repositorio:
     """
 
     def __init__(self, servidor: str = SERVIDOR, base: str = BASE,
-                 driver: str = DRIVER, url: "str | None" = None,
+                 driver: "str | None" = None, url: "str | None" = None,
                  esquema: "str | None" = None):
-        self.servidor, self.base, self.driver = servidor, base, driver
+        self.servidor, self.base = servidor, base
+        self.driver = driver or elegir_driver()
         self.url = url
         self.engine = None
         self._esquema = esquema
@@ -833,12 +881,27 @@ class Repositorio:
             raise RuntimeError(
                 "Falta SQLAlchemy. En una celda: !pip install sqlalchemy pyodbc"
             ) from err
-        self.engine = create_engine(self.cadena(), future=True)
-        with self.engine.connect() as conn:
-            if self.cadena().startswith("mssql"):
-                fila = conn.execute(text("SELECT @@SERVERNAME, DB_NAME(), SUSER_SNAME()")).one()
-                return f"{fila[0]} · base {fila[1]} · como {fila[2]}"
-            return f"SQLite · {self.cadena()}"
+        try:
+            self.engine = create_engine(self.cadena(), future=True)
+            with self.engine.connect() as conn:
+                if not self.cadena().startswith("mssql"):
+                    return f"SQLite · {self.cadena()}"
+                fila = conn.execute(text(
+                    "SELECT @@SERVERNAME, DB_NAME(), SUSER_SNAME(), "
+                    "HAS_PERMS_BY_NAME(NULL, NULL, 'CREATE TABLE')")).one()
+                self.puede_crear = bool(fila[3])
+                aviso = "" if fila[3] else " · SIN permiso para crear tablas en esta base"
+                return f"{fila[0]} · base {fila[1]} · como {fila[2]} · driver {self.driver}{aviso}"
+        except Exception as err:
+            self.engine = None
+            ds = drivers_odbc()
+            pista = ""
+            if not ds:
+                pista = ("\n  No hay ningún driver ODBC de SQL Server instalado "
+                         "(o falta pyodbc: pip install pyodbc).")
+            elif self.driver not in ds:
+                pista = f"\n  Drivers instalados aquí: {', '.join(ds)}."
+            raise RuntimeError(f"{err}{pista}") from err
 
     def _asegura(self):
         if self.engine is None:
@@ -2410,6 +2473,8 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
         apunta("  (instala tkinterdnd2 si quieres arrastrar y soltar: pip install tkinterdnd2)",
                "warn")
     apunta(f"· servidor por conectar: {repo.servidor} · base {repo.base}")
+    for linea in diagnostico():
+        apunta("  " + linea, "warn" if "FALTA" in linea or "ninguno" in linea else "")
     pinta_tarjetas()
     llena_combos()
     actualiza_botones()

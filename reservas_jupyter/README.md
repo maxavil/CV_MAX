@@ -103,6 +103,22 @@ DRIVER={ODBC Driver 17 for SQL Server};SERVER=Qauditinterna;DATABASE=PLD_492;Tru
 
 Servidor y base se editan en la propia ventana. Hace falta `pip install sqlalchemy pyodbc`.
 
+El driver ODBC **se detecta solo**: si el equipo trae el 18 y no el 17, o sólo el
+Native Client, se usa el que haya. Al abrir la ventana, la bitácora dice qué
+librerías y qué drivers encontró, y al conectar avisa si la cuenta no tiene
+permiso para crear tablas en esa base — todo antes de que te pelees con el
+servidor a ciegas.
+
+### Primera corrida en una máquina nueva
+
+```
+pip install openpyxl pyxlsb sqlalchemy pyodbc
+pip install tkinterdnd2      # opcional, para arrastrar y soltar
+```
+
+Luego abre el notebook, ejecuta la celda y mira la bitácora: ahí sale el
+diagnóstico del equipo antes de tocar nada.
+
 ### Las tres tablas de la vista
 
 Los desplegables listan cada copia subida —`mes · fuente · archivo · usuario · #carga`—
