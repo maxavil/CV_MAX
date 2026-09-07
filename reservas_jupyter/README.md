@@ -88,7 +88,18 @@ su huella sha256— y su **detalle** con los importes por corte y concepto:
 ```
 dbo.ReservasQES_Cargas    carga_id · usuario · equipo · fecha_carga · fuente ·
                           archivo · hoja · sha256 · periodo_min/max · filas · nota
-dbo.ReservasQES_Detalle   carga_id · periodo · concepto · cuenta · local · cnsf
+dbo.ReservasQES_Detalle   carga_id · periodo · concepto · cuenta · etiqueta ·
+                          metodologia_local · metodo_estatutario
+dbo.vw_ReservasQES        las dos ya unidas, con la diferencia calculada
+```
+
+La vista `vw_ReservasQES` es para consultar desde SSMS o Excel sin armar el join:
+
+```sql
+SELECT periodo, etiqueta, metodologia_local, metodo_estatutario, diferencia
+FROM   dbo.vw_ReservasQES
+WHERE  fuente = 'actuarios'
+ORDER  BY periodo, concepto;
 ```
 
 Nada se pisa: subir otra vez el mismo mes deja una copia nueva y la anterior se
@@ -98,8 +109,23 @@ el archivo ya está (misma huella), la ventana avisa antes de duplicarlo.
 La conexión es la de siempre, con autenticación integrada de Windows:
 
 ```
-DRIVER={ODBC Driver 17 for SQL Server};SERVER=Qauditinterna;DATABASE=PLD_492;Trusted_Connection=yes
+DRIVER={ODBC Driver 17 for SQL Server};SERVER=Qauditinterna;DATABASE=Reservas_QES;Trusted_Connection=yes
 ```
+
+### La base propia
+
+Una cuenta normal no puede crear tablas en una base ajena —en `PLD_492`, por
+ejemplo, `QUALITAS\usuario` no tiene ese permiso—. El botón **Crear base** crea
+una base propia en el mismo servidor: se conecta sin base, con `autocommit`
+(un `CREATE DATABASE` no corre dentro de una transacción), y al terminar entra
+sola a la base nueva, donde ya eres dueño y las tablas se crean sin problema.
+
+El nombre se interpola en el SQL —`CREATE DATABASE` no admite parámetro—, así que
+sólo se aceptan identificadores simples: letras, números y guion bajo, empezando
+por letra. Cualquier otra cosa se rechaza antes de tocar el servidor.
+
+El orden del primer día es: **Conectar → Crear base → Crear tablas → Subir**.
+De ahí en adelante, cada mes es sólo cargar y subir.
 
 Servidor y base se editan en la propia ventana. Hace falta `pip install sqlalchemy pyodbc`.
 
@@ -158,13 +184,14 @@ el color nunca sea la única pista.
 
 ## Comprobación
 
-`verificar.py` ejecuta el bloque sin abrir ventana y contrasta 181 cifras contra
+`verificar.py` ejecuta el bloque sin abrir ventana y contrasta 193 cifras contra
 los valores de control del cierre de junio 2026: los seis cortes concepto por
 concepto, la vista en millones, los indicadores, la estructura del HTML, el ida y
 vuelta completo por la base de datos (contra un SQLite, con el mismo código que
 corre en SQL Server), la página de evolución y el interruptor de moneda —celda por
 celda, con el tipo de cambio de cada cierre, y comprobando que el indicador y el
-mensaje clave digan la misma variación—. Además vuelve a cargar la balanza para
+mensaje clave digan la misma variación—, la vista plana del servidor y el
+rechazo de nombres de base inválidos. Además vuelve a cargar la balanza para
 confirmar que el histórico conserva los cortes anteriores.
 
 ```

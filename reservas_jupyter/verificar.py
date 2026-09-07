@@ -169,7 +169,11 @@ def main(argv):
     repo.conectar()
     igual("el esquema aún no existe", 1 if repo.existe_esquema() else 0, 0, 0)
     igual("el catálogo vacío no revienta", len(repo.snapshots()), 0, 0)
-    igual("tablas creadas", len(repo.crear_esquema()), 2, 0)
+    creadas = repo.crear_esquema()
+    for objeto in (BLOQUE["TABLA_CARGAS"], BLOQUE["TABLA_DETALLE"], BLOQUE["VISTA_SQL"]):
+        pruebas += 1
+        if objeto not in creadas:
+            fallos.append(f"crear_esquema no creó «{objeto}»: creó {creadas}")
     igual("crear el esquema dos veces no duplica", len(repo.crear_esquema()), 0, 0)
     igual("el esquema ya existe", 1 if repo.existe_esquema() else 0, 1, 0)
 
@@ -242,6 +246,37 @@ def main(argv):
     pruebas += 1
     if ev.index('class="tip t0') < ev.rindex('class="col c'):
         fallos.append("los globos se dibujan antes que las columnas y quedan tapados")
+
+    # ---- 7 bis. la base propia y la vista plana --------------------------
+    from sqlalchemy import inspect as _inspect
+    igual("la vista plana existe en la base",
+          1 if BLOQUE["VISTA_SQL"] in _inspect(repo.engine).get_view_names() else 0, 1, 0)
+    from sqlalchemy import text as _text
+    with repo.engine.connect() as _c:
+        fila = _c.execute(_text(
+            "SELECT metodologia_local, metodo_estatutario, diferencia FROM "
+            f"{BLOQUE['VISTA_SQL']} WHERE periodo='2026-06-30' AND concepto='rrc' "
+            f"AND carga_id={id_act}")).one()
+    igual("la vista trae la metodología local", float(fila[0]),
+          h.datos["2026-06-30"]["local_actuarios"]["rrc"], 0.005)
+    igual("la vista trae el método estatutario", float(fila[1]),
+          h.datos["2026-06-30"]["cnsf"]["rrc"], 0.005)
+    igual("la vista calcula la diferencia", float(fila[2]),
+          h.diferencia("2026-06-30", "rrc"), 0.5)
+
+    # el nombre de la base se interpola en el SQL: sólo identificadores simples
+    for malo in ("Reservas QES", "1base", "x];DROP DATABASE y--", "a" * 130, "base-x"):
+        pruebas += 1
+        try:
+            repo.crear_base(malo)
+            fallos.append(f"aceptó un nombre de base inválido: {malo!r}")
+        except ValueError:
+            pass
+        except Exception as err:
+            fallos.append(f"el nombre {malo!r} falló con algo que no es ValueError: {err}")
+    pruebas += 1
+    if repo.crear_base("Reservas_QES") is not False:
+        fallos.append("en SQLite crear_base debería no hacer nada y devolver False")
 
     # ---- 8. las dos monedas ---------------------------------------------
     TC = {"2025-12-31": 17.8410, "2026-03-31": 17.6220, "2026-06-30": 17.4986}

@@ -58,10 +58,11 @@ HIST_JSON = "historico_reservas.json"
 
 # --- servidor de auditoría ---------------------------------------------------
 SERVIDOR = "Qauditinterna"                    # nombre del servidor SQL
-BASE = "PLD_492"                              # base de datos
+BASE = "Reservas_QES"                         # base propia; se crea si no existe
 DRIVER = "ODBC Driver 17 for SQL Server"
 TABLA_CARGAS = "ReservasQES_Cargas"           # una fila por archivo subido
 TABLA_DETALLE = "ReservasQES_Detalle"         # importes por corte y concepto
+VISTA_SQL = "vw_ReservasQES"                  # las dos, ya unidas, para consultar
 
 # Las tres ranuras de la vista, en el orden en que salen en la matriz.
 RANURAS = [("dic", "Diciembre"), ("t1", "t-1"), ("t", "t")]
@@ -939,12 +940,50 @@ class Repositorio:
             Column("concepto", String(8), nullable=False),
             Column("cuenta", String(8)),
             Column("etiqueta", String(80)),
-            Column("local", Numeric(20, 6)),
-            Column("cnsf", Numeric(20, 6)),
+            Column("metodologia_local", Numeric(20, 6)),
+            Column("metodo_estatutario", Numeric(20, 6)),
             PrimaryKeyConstraint("carga_id", "periodo", "concepto"),
         )
         self._tablas = (md, cargas, detalle)
         return self._tablas
+
+    def crear_base(self, nombre: "str | None" = None) -> bool:
+        """Crea la base en el servidor si no existe. Devuelve si la creó.
+
+        Va por pyodbc directo y con autocommit —no por SQLAlchemy— porque
+        CREATE DATABASE no corre dentro de una transacción, y porque hay que
+        conectarse al servidor SIN base para poder crearla.
+        """
+        nombre = (nombre or self.base).strip()
+        # el nombre se interpola en el SQL (CREATE DATABASE no acepta parámetro),
+        # así que solo se admite un identificador simple
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,120}", nombre):
+            raise ValueError(
+                f"«{nombre}» no sirve como nombre de base: usa letras, números y "
+                "guion bajo, empezando por letra (por ejemplo Reservas_QES)."
+            )
+        if not self.cadena().startswith("mssql"):
+            return False          # en SQLite el archivo se crea solo
+        try:
+            import pyodbc
+        except ImportError as err:
+            raise RuntimeError("Falta pyodbc. En una celda: !pip install pyodbc") from err
+
+        cn = pyodbc.connect(
+            f"DRIVER={{{self.driver}}};"
+            f"SERVER={self.servidor};"
+            "Trusted_Connection=yes;"
+        )
+        try:
+            cn.autocommit = True
+            cur = cn.cursor()
+            cur.execute("SELECT DB_ID(?)", nombre)
+            if cur.fetchone()[0] is not None:
+                return False      # ya existía; no se toca
+            cur.execute(f"CREATE DATABASE [{nombre}]")
+            return True
+        finally:
+            cn.close()
 
     def existe_esquema(self) -> bool:
         """¿Están ya las dos tablas? La primera vez, claro que no."""
@@ -961,7 +1000,30 @@ class Repositorio:
         md.create_all(eng, checkfirst=True)
         despues = set(inspect(eng).get_table_names(schema=self.esquema))
         nuevas = sorted(despues - antes)
-        return nuevas or []
+        nuevas += self._crear_vista()
+        return nuevas
+
+    def _crear_vista(self) -> "list[str]":
+        """Una vista plana con todo junto, para consultarla desde Excel o SSMS."""
+        from sqlalchemy import inspect, text
+        eng = self._asegura()
+        insp = inspect(eng)
+        if VISTA_SQL in set(insp.get_view_names(schema=self.esquema)):
+            return []
+        pre = f"{self.esquema}." if self.esquema else ""
+        sql = (f"CREATE VIEW {pre}{VISTA_SQL} AS "
+               "SELECT c.carga_id, c.usuario, c.equipo, c.fecha_carga, c.fuente, "
+               "c.archivo, d.periodo, d.concepto, d.cuenta, d.etiqueta, "
+               "d.metodologia_local, d.metodo_estatutario, "
+               "(d.metodo_estatutario - d.metodologia_local) AS diferencia "
+               f"FROM {pre}{TABLA_CARGAS} c "
+               f"JOIN {pre}{TABLA_DETALLE} d ON c.carga_id = d.carga_id")
+        try:
+            with eng.begin() as conn:
+                conn.execute(text(sql))
+            return [VISTA_SQL]
+        except Exception:
+            return []          # la vista es una comodidad, no un requisito
 
     # -------------------------------------------------------------- subidas
     def ya_subido(self, sha: str) -> "list[int]":
@@ -988,8 +1050,8 @@ class Repositorio:
                 cuenta, label = etiquetas.get(cid, (None, cid))
                 filas.append({"periodo": p, "concepto": cid, "cuenta": cuenta,
                               "etiqueta": label,
-                              "local": src["local"].get(cid),
-                              "cnsf": src["cnsf"].get(cid)})
+                              "metodologia_local": src["local"].get(cid),
+                              "metodo_estatutario": src["cnsf"].get(cid)})
         if not filas:
             raise ValueError(f"{lec.archivo}: no hay importes que subir.")
 
@@ -1039,7 +1101,8 @@ class Repositorio:
         from sqlalchemy import select
         eng = self._asegura()
         _, _, detalle = self.tablas()
-        q = select(detalle.c.concepto, detalle.c.local, detalle.c.cnsf).where(
+        q = select(detalle.c.concepto, detalle.c.metodologia_local,
+                   detalle.c.metodo_estatutario).where(
             (detalle.c.carga_id == carga_id) & (detalle.c.periodo == periodo))
         out = {"local": {}, "cnsf": {}}
         with eng.connect() as conn:
@@ -2030,6 +2093,8 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
     tk.Entry(fila1, textvariable=base_var, width=14, font=(MONO, 9)).pack(side="left", padx=(6, 14))
     btn_conectar = ttk.Button(fila1, text="Conectar")
     btn_conectar.pack(side="left")
+    btn_base = ttk.Button(fila1, text="Crear base")
+    btn_base.pack(side="left", padx=(6, 0))
     btn_esquema = ttk.Button(fila1, text="Crear tablas", state="disabled")
     btn_esquema.pack(side="left", padx=(6, 0))
     btn_subir = ttk.Button(fila1, text="Subir al servidor", state="disabled")
@@ -2040,8 +2105,9 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
                        wraplength=ancho_texto, justify="left")
     lbl_srv.pack(fill="x", padx=14, pady=(0, 4))
     tk.Label(srv, text=f"Autenticación integrada de Windows · tablas {TABLA_CARGAS} y "
-                       f"{TABLA_DETALLE} · cada subida queda como una copia nueva, "
-                       "etiquetada por mes y por usuario.",
+                       f"{TABLA_DETALLE}, más la vista {VISTA_SQL} con todo junto · "
+                       "cada subida queda como una copia nueva, etiquetada por mes "
+                       "y por usuario.",
              bg=PAPER, fg=INK_3, font=(UI, 8), anchor="w",
              wraplength=ancho_texto, justify="left").pack(fill="x", padx=14, pady=(0, 12))
 
@@ -2212,8 +2278,14 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
             actualiza_botones()
             return
         estado["conectado"] = True
-        lbl_srv.configure(text=f"Conectado a {donde}", fg="#0E7C66")
-        apunta(f"· conectado a {donde}", "ok")
+        lbl_srv.configure(text=f"Conectado a {donde}",
+                          fg=WARN if "SIN permiso" in donde else "#0E7C66")
+        apunta(f"· conectado a {donde}", "warn" if "SIN permiso" in donde else "ok")
+        if "SIN permiso" in donde:
+            apunta(f"  esta cuenta no puede crear tablas en «{repo.base}». Escribe en "
+                   "«Base» un nombre propio (por ejemplo Reservas_QES) y pica "
+                   "«Crear base»: quedas dueño de ella y ahí sí puedes crear las tablas.",
+                   "warn")
         try:
             if not repo.existe_esquema():
                 apunta("  las tablas todavía no existen en esta base: "
@@ -2222,11 +2294,31 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
             apunta(f"! no se pudo revisar el esquema: {err}", "err")
         refresca_snapshots()
 
+    def crear_base() -> None:
+        nombre = base_var.get().strip()
+        if not nombre:
+            apunta("! escribe primero el nombre de la base en «Base» "
+                   "(por ejemplo Reservas_QES).", "err")
+            return
+        repo.servidor = srv_var.get().strip()
+        try:
+            creada = repo.crear_base(nombre)
+        except Exception as err:
+            apunta(f"! no se pudo crear la base «{nombre}»: {err}", "err")
+            return
+        apunta(f"· base «{nombre}» {'creada' if creada else 'ya existía, no se tocó'} "
+               f"en {repo.servidor}", "ok")
+        repo.base = nombre
+        conectar()          # entrar ya a la base nueva, donde sí somos dueños
+
     def crear_tablas() -> None:
         try:
             nuevas = repo.crear_esquema()
         except Exception as err:
             apunta(f"! no se pudieron crear las tablas: {err}", "err")
+            if "permission" in str(err).lower() or "permiso" in str(err).lower():
+                apunta(f"  en «{repo.base}» no tienes ese permiso. Pon un nombre propio "
+                       "en «Base» y pica «Crear base».", "warn")
             return
         apunta("· tablas creadas: " + ", ".join(nuevas) if nuevas
                else "· las tablas ya existían, no se tocó nada", "ok")
@@ -2257,6 +2349,7 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
         refresca_snapshots()
 
     btn_conectar.configure(command=conectar)
+    btn_base.configure(command=crear_base)
     btn_esquema.configure(command=crear_tablas)
     btn_subir.configure(command=subir)
 
