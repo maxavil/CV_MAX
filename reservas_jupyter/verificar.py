@@ -163,6 +163,86 @@ def main(argv):
     igual("un corte anterior quedó intacto", h2.datos["2025-12-31"]["cnsf"]["rrc"],
           antes["rrc"], 0.005)
 
+    # ---- 6. el servidor: subir, catalogar y volver a armar --------------
+    Repositorio, leer_fuente = BLOQUE["Repositorio"], BLOQUE["leer_fuente"]
+    repo = Repositorio(url=f"sqlite:///{tmp/'audit.db'}")
+    repo.conectar()
+    igual("el esquema aún no existe", 1 if repo.existe_esquema() else 0, 0, 0)
+    igual("el catálogo vacío no revienta", len(repo.snapshots()), 0, 0)
+    igual("tablas creadas", len(repo.crear_esquema()), 2, 0)
+    igual("crear el esquema dos veces no duplica", len(repo.crear_esquema()), 0, 0)
+    igual("el esquema ya existe", 1 if repo.existe_esquema() else 0, 1, 0)
+
+    lec_act = leer_fuente(actuarios)
+    id_act = repo.subir(lec_act, usuario="prueba")
+    igual("cortes que trae el archivo de actuarios", len(lec_act.cortes), 6, 0)
+    lec_bal = leer_fuente(balanza)
+    id_bal = repo.subir(lec_bal, usuario="prueba")
+    igual("la balanza se sube con su corte", len(lec_bal.cortes), 1, 0)
+    igual("se reconoce el archivo ya subido", len(repo.ya_subido(lec_bal.sha256)), 1, 0)
+
+    # una copia más del mismo mes: la anterior se conserva, no se pisa
+    id_bis = repo.subir(lec_bal, usuario="otro", nota="segunda copia")
+    pruebas += 1
+    if id_bis == id_bal:
+        fallos.append("la segunda copia pisó la primera en vez de quedar aparte")
+    snaps = repo.snapshots()
+    igual("copias de junio 2026 en el catálogo",
+          len([s for s in snaps if s["periodo"] == "2026-06-30"]), 3, 0)
+    igual("usuarios distintos en el catálogo",
+          len({s["usuario"] for s in snaps}), 2, 0)
+
+    # los importes vuelven del servidor idénticos a como entraron
+    for cid in ("rrc", "rsr", "rsnr"):
+        igual(f"ida y vuelta por la base ({cid})",
+              repo.importes(id_bal, "2026-06-30")["local"][cid],
+              h.datos["2026-06-30"]["local"][cid], 0.005)
+
+    # las tres ranuras: diciembre · t-1 · t, con la copia elegida a mano
+    hs = repo.historico([("2025-12-31", id_act), ("2026-03-31", id_act),
+                         ("2026-06-30", id_bal)], ruta_json=tmp / "hs.json")
+    igual("cortes armados desde el servidor", len(hs.periodos()), 3, 0)
+    for per, filas in VISTA.items():
+        igual(f"servidor · {per} total dif", hs.diferencia(per) / 1e6,
+              filas["total"][2], 0.005)
+    igual("servidor · variación %",
+          (hs.diferencia("2026-06-30") - hs.diferencia("2026-03-31"))
+          / hs.diferencia("2026-03-31") * 100, 10.3, 0.05)
+    # el origen debe decir de qué carga exacta salió cada columna
+    org = hs.datos["2026-06-30"]["origen"]
+    for etq, texto, carga, archivo in (
+            ("local", org.get("local", ""), id_bal, Path(balanza).name),
+            ("cnsf", org.get("cnsf", ""), id_act, Path(actuarios).name)):
+        pruebas += 1
+        if f"#{carga}" not in texto or archivo not in texto:
+            fallos.append(f"el origen de la columna {etq} no identifica su carga "
+                          f"(esperaba #{carga} y {archivo}): {texto!r}")
+
+    # ---- 7. la evolución mes con mes ------------------------------------
+    escribir_evolucion = BLOQUE["escribir_evolucion"]
+    ruta_ev = escribir_evolucion(h, destino=tmp / "evolucion.html", abrir=False)
+    ev = ruta_ev.read_text(encoding="utf-8")
+    for cadena in ("Evolución de la diferencia", "3.12", "4.52", "<svg", "MM USD",
+                   "Las mismas cifras, en tabla", "Diferencia total"):
+        pruebas += 1
+        if cadena not in ev:
+            fallos.append(f"la evolución no trae «{cadena}»")
+    for prohibido in ("http://", "https://", "<script"):
+        pruebas += 1
+        if prohibido in ev:
+            fallos.append(f"la evolución no es autocontenida: contiene «{prohibido}»")
+    # un globo por columna, y cada uno emparejado con la suya
+    igual("columnas graficadas", ev.count('class="col c'), 6, 0)
+    igual("globos del cursor", ev.count('class="tip t'), 6, 0)
+    for i in range(6):
+        pruebas += 1
+        if f".c{i}:hover ~ .t{i}" not in ev:
+            fallos.append(f"la columna {i} no enciende su globo")
+    # los globos se pintan al final: si no, la columna siguiente los tapa
+    pruebas += 1
+    if ev.index('class="tip t0') < ev.rindex('class="col c'):
+        fallos.append("los globos se dibujan antes que las columnas y quedan tapados")
+
     print(f"{pruebas} comprobaciones · {len(fallos)} fallo(s)")
     if fallos:
         for f in fallos:

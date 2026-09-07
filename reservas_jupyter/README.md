@@ -24,8 +24,12 @@ reservas_jupyter/
    nada más.
 3. Carga la balanza (`.xlsx`) y el archivo de actuarios (`.xlsb`). La ventana
    muestra qué leyó de cada uno antes de procesar nada.
-4. Pica **Procesar**. Se escribe `vista_reservas_AAAA-MM-DD.html` junto al
-   notebook y se abre en el navegador.
+4. **Conectar** al servidor de auditoría, **Crear tablas** (solo la primera vez)
+   y **Subir al servidor** para dejar la copia del mes.
+5. Elige las tres tablas de la vista en los desplegables: *Diciembre · t-1 · t*.
+6. Pica **Procesar**. Se escribe `vista_reservas_AAAA-MM-DD.html` junto al
+   notebook y se abre en el navegador. **Ver evolución** escribe
+   `evolucion_diferencia.html` con la diferencia mes con mes.
 
 La celda queda ocupada con `[*]` mientras la ventana está abierta: es el
 `mainloop()` de Tk y es normal. Se libera al cerrarla.
@@ -74,18 +78,68 @@ coincide, se avisa en la bitácora y en una banda ámbar del HTML.
 Un corte al que solo se le cargó una de las dos fuentes no inventa ceros: sus
 celdas de la otra columna quedan en guion y los indicadores dicen qué falta.
 
+## El servidor de auditoría
+
+Cada archivo que se sube queda como una **carga** —quién, cuándo, qué archivo, con
+su huella sha256— y su **detalle** con los importes por corte y concepto:
+
+```
+dbo.ReservasQES_Cargas    carga_id · usuario · equipo · fecha_carga · fuente ·
+                          archivo · hoja · sha256 · periodo_min/max · filas · nota
+dbo.ReservasQES_Detalle   carga_id · periodo · concepto · cuenta · local · cnsf
+```
+
+Nada se pisa: subir otra vez el mismo mes deja una copia nueva y la anterior se
+conserva, así que siempre se puede volver a la que se usó en un cierre pasado. Si
+el archivo ya está (misma huella), la ventana avisa antes de duplicarlo.
+
+La conexión es la de siempre, con autenticación integrada de Windows:
+
+```
+DRIVER={ODBC Driver 17 for SQL Server};SERVER=Qauditinterna;DATABASE=PLD_492;Trusted_Connection=yes
+```
+
+Servidor y base se editan en la propia ventana. Hace falta `pip install sqlalchemy pyodbc`.
+
+### Las tres tablas de la vista
+
+Los desplegables listan cada copia subida —`mes · fuente · archivo · usuario · #carga`—
+y el usuario decide cuál va en cada columna: **1 Diciembre**, **2 t-1**, **3 t**.
+Por omisión se proponen el diciembre más reciente, el último corte y el anterior.
+La columna local sale de la carga elegida (la balanza, si la hay) y la estatutaria
+de la carga de actuarios más nueva de ese corte; el pie del HTML dice de qué carga
+salió cada una. Sin servidor conectado, los desplegables muestran los cortes del
+histórico local y todo sigue funcionando igual.
+
+### Evolución de la diferencia
+
+**Ver evolución** escribe una página aparte con la diferencia de todos los cortes en
+columnas apiladas por reserva, con el desglose al pasar el cursor y la misma tabla
+debajo. Los colores de serie salen de la paleta de la casa, pero elegidos entre los
+pasos que separan bien para daltonismo (ΔE 25 en deuteranopia, contra los 2.8 del
+vino contra el azul oscuro); aun así van con leyenda y etiqueta directa, para que
+el color nunca sea la única pista.
+
 ## Comprobación
 
-`verificar.py` ejecuta el bloque sin abrir ventana y contrasta 106 cifras contra
-los valores de control del cierre de junio 2026 —los seis cortes concepto por
-concepto, la vista en millones, los indicadores y la estructura del HTML—, y
-además vuelve a cargar la balanza para confirmar que el histórico se conserva.
+`verificar.py` ejecuta el bloque sin abrir ventana y contrasta 146 cifras contra
+los valores de control del cierre de junio 2026: los seis cortes concepto por
+concepto, la vista en millones, los indicadores, la estructura del HTML, el ida y
+vuelta completo por la base de datos (contra un SQLite, con el mismo código que
+corre en SQL Server) y la página de evolución. Además vuelve a cargar la balanza
+para confirmar que el histórico conserva los cortes anteriores.
 
 ```
 python verificar.py ruta/Balanza_062026.xlsx ruta/ResultadosQES.xlsb
 ```
 
-Los dos Excel no se guardan en el repositorio: son datos del cliente.
+Los Excel no se guardan en el repositorio: son datos del cliente.
+
+Para probar la parte del servidor sin red, la ventana acepta un SQLite:
+
+```python
+abrir_ventana(url_bd="sqlite:///pruebas.db")
+```
 
 Nota sobre dos cifras del encargo. La variación de junio 2026 es **+10.3 %**
 (la imagen de referencia dice 10.2 % porque se sacó de cifras ya redondeadas) y,
@@ -112,3 +166,8 @@ exactos en los dos casos.
   `procesar_sin_ventana(balanza, actuarios)`, que hace lo mismo sin interfaz.
 - Rutas de Windows: escríbelas como `r"C:\Users\..."`, porque `\U` es un escape
   de Python.
+- Conectar antes de que existan las tablas es lo normal la primera vez: la ventana
+  lo dice con palabras y ofrece «Crear tablas», en vez de volcar el error de SQL.
+- En SVG no hay `z-index`: lo único que decide qué tapa a qué es el orden. Por eso
+  los globos del cursor se dibujan todos al final y cada columna enciende el suyo
+  con el `~` de CSS.

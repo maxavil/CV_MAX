@@ -16,12 +16,16 @@
 from __future__ import annotations
 
 import datetime as dt
+import getpass
+import hashlib
 import html
 import json
 import os
+import platform
 import re
 import sys
 import unicodedata
+import urllib.parse
 import webbrowser
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -51,6 +55,16 @@ GRADO = 3                    # columna de la balanza de la que se toma el saldo
 FX_DEFAULT = 17.4986         # MXN por USD
 PERIODOS_EN_VISTA = 3        # cortes que se muestran por omisión
 HIST_JSON = "historico_reservas.json"
+
+# --- servidor de auditoría ---------------------------------------------------
+SERVIDOR = "Qauditinterna"                    # nombre del servidor SQL
+BASE = "PLD_492"                              # base de datos
+DRIVER = "ODBC Driver 17 for SQL Server"
+TABLA_CARGAS = "ReservasQES_Cargas"           # una fila por archivo subido
+TABLA_DETALLE = "ReservasQES_Detalle"         # importes por corte y concepto
+
+# Las tres ranuras de la vista, en el orden en que salen en la matriz.
+RANURAS = [("dic", "Diciembre"), ("t1", "t-1"), ("t", "t")]
 
 NOTA_PIE = ("Esta reserva se calcula una vez al año, al cierre del ejercicio, "
             "en atención a la normativa de El Salvador.")
@@ -391,6 +405,83 @@ def parse_actuarios(hojas: Sequence) -> LecturaActuarios:
 
 
 # -----------------------------------------------------------------------------
+# 5 bis. Una lectura, dos destinos: el histórico local y el servidor
+# -----------------------------------------------------------------------------
+
+
+@dataclass
+class Lectura:
+    """Lo que se sacó de un archivo, ya normalizado y sin importar de cuál venga."""
+    fuente: str                                   # "balanza" | "actuarios"
+    archivo: str
+    hoja: str
+    periodos: "dict[str, dict[str, dict[str, float]]]"   # periodo -> {local, cnsf}
+    detalle: "list[str]"
+    faltantes: "list[str]"
+    sha256: str
+
+    @property
+    def cortes(self) -> "list[str]":
+        return sorted(self.periodos)
+
+    @property
+    def titulo(self) -> str:
+        if self.fuente == "balanza":
+            p = self.cortes[0] if self.cortes else None
+            return ("Balanza de comprobación  ·  "
+                    + (etiqueta_periodo(p) if p else "periodo sin identificar"))
+        return f"Archivo de actuarios  ·  {len(self.cortes)} corte(s)"
+
+    @property
+    def resumen(self) -> str:
+        if self.fuente == "balanza":
+            txt = " · ".join(self.detalle) or "sin importes"
+            if self.faltantes:
+                txt += f"  ·  SIN CUENTA {', '.join(self.faltantes)}"
+            return f"hoja «{self.hoja}»  ·  {txt}"
+        return ("cortes: " + ", ".join(etiqueta_corta(p) for p in self.cortes)
+                + "\nhojas: " + self.hoja)
+
+
+def sha256_archivo(ruta: "str | Path") -> str:
+    """Huella del archivo, para reconocer una copia ya subida."""
+    h = hashlib.sha256()
+    with open(ruta, "rb") as f:
+        for trozo in iter(lambda: f.read(1 << 20), b""):
+            h.update(trozo)
+    return h.hexdigest()
+
+
+def leer_fuente(ruta: "str | Path", hojas: "Sequence | None" = None) -> Lectura:
+    """Lee un Excel y devuelve la Lectura, detectando solo de cuál de los dos se trata."""
+    ruta = Path(ruta)
+    if hojas is None:
+        hojas = leer_libro(ruta)
+
+    bal = parse_balanza(hojas, ruta.name)
+    if bal is not None:
+        if not bal.periodo:
+            raise ValueError(
+                f"{ruta.name}: se leyó la balanza pero no se identificó el periodo. "
+                "Renombra el archivo como Balanza_MMAAAA.xlsx."
+            )
+        return Lectura("balanza", ruta.name, bal.hoja,
+                       {bal.periodo: {"local": dict(bal.valores), "cnsf": {}}},
+                       bal.detalle, bal.faltantes, sha256_archivo(ruta))
+
+    act = parse_actuarios(hojas)
+    if not act.periodos:
+        raise ValueError(
+            f"{ruta.name}: no se reconoció ni como balanza (falta la columna CUENTA) "
+            "ni como archivo de actuarios (faltan los tres conceptos de reserva)."
+        )
+    return Lectura("actuarios", ruta.name, ", ".join(act.hojas),
+                   {p: {"local": dict(v["local"]), "cnsf": dict(v["cnsf"])}
+                    for p, v in act.periodos.items()},
+                   [], [], sha256_archivo(ruta))
+
+
+# -----------------------------------------------------------------------------
 # 6. Histórico: cada archivo actualiza su periodo y conserva los demás
 # -----------------------------------------------------------------------------
 
@@ -424,37 +515,27 @@ class Historico:
         Si el libro ya se leyó antes (la ventana lo hace para la vista previa),
         se pasa en `hojas` y no se vuelve a abrir el archivo.
         """
-        ruta = Path(ruta)
-        if hojas is None:
-            hojas = leer_libro(ruta)
+        return self.fundir(leer_fuente(ruta, hojas))
+
+    def fundir(self, lec: Lectura) -> "list[str]":
+        """Mete una Lectura al histórico: actualiza su periodo y conserva los demás."""
         avisos: "list[str]" = []
 
-        bal = parse_balanza(hojas, ruta.name)
-        if bal is not None:
-            if not bal.periodo:
-                raise ValueError(
-                    f"{ruta.name}: se leyó la balanza pero no se identificó el periodo. "
-                    "Renombra el archivo como Balanza_MMAAAA.xlsx."
-                )
-            e = self._entrada(bal.periodo)
-            e["local"].update(bal.valores)
-            e["origen"]["local"] = f"Balanza · {ruta.name}"
+        if lec.fuente == "balanza":
+            p = lec.cortes[0]
+            e = self._entrada(p)
+            e["local"].update(lec.periodos[p]["local"])
+            e["origen"]["local"] = f"Balanza · {lec.archivo}"
             self._revisar(e)
             avisos.append(
-                f"{ruta.name} → balanza al {etiqueta_periodo(bal.periodo)} · " + " · ".join(bal.detalle)
-                + (f" · SIN CUENTA {', '.join(bal.faltantes)}" if bal.faltantes else "")
+                f"{lec.archivo} → balanza al {etiqueta_periodo(p)} · " + " · ".join(lec.detalle)
+                + (f" · SIN CUENTA {', '.join(lec.faltantes)}" if lec.faltantes else "")
             )
             return avisos
 
-        act = parse_actuarios(hojas)
-        if not act.periodos:
-            raise ValueError(
-                f"{ruta.name}: no se reconoció ni como balanza (falta la columna CUENTA) "
-                "ni como archivo de actuarios (faltan los tres conceptos de reserva)."
-            )
-        for p in sorted(act.periodos):
+        for p in lec.cortes:
             e = self._entrada(p)
-            src = act.periodos[p]
+            src = lec.periodos[p]
             e["cnsf"].update(src["cnsf"])
             e["local_actuarios"] = src["local"]
             origen_local = e["origen"].get("local", "")
@@ -464,13 +545,13 @@ class Historico:
                 for cid, val in src["local"].items():
                     e["local"].setdefault(cid, val)
                 if not origen_local:
-                    e["origen"]["local"] = f"Actuarios · {ruta.name}"
-            e["origen"]["cnsf"] = f"Actuarios · {ruta.name}"
+                    e["origen"]["local"] = f"Actuarios · {lec.archivo}"
+            e["origen"]["cnsf"] = f"Actuarios · {lec.archivo}"
             self._revisar(e)
         avisos.append(
-            f"{ruta.name} → actuarios, {len(act.periodos)} corte(s): "
-            + ", ".join(etiqueta_corta(p) for p in sorted(act.periodos))
-            + " · hojas: " + ", ".join(act.hojas)
+            f"{lec.archivo} → actuarios, {len(lec.cortes)} corte(s): "
+            + ", ".join(etiqueta_corta(p) for p in lec.cortes)
+            + " · hojas: " + lec.hoja
         )
         avisos += [f"Revisar {etiqueta_periodo(p)}: {self.datos[p]['aviso']}"
                    for p in self.periodos() if self.datos[p].get("aviso")]
@@ -623,6 +704,278 @@ class Historico:
         lineas += ["-" * len(cab), fila, "",
                    "Millones de USD. Diferencia = Método Estatutario CNSF − Metodología local."]
         return "\n".join(lineas)
+
+
+# -----------------------------------------------------------------------------
+# 6 bis. El servidor de auditoría: copias etiquetadas por mes y por usuario
+# -----------------------------------------------------------------------------
+#
+# Cada archivo que se sube queda como una CARGA (quién, cuándo, qué archivo) con
+# su DETALLE (importes por corte y concepto). No se pisa nada: subir otra vez el
+# mismo mes deja una copia nueva y la anterior se conserva, así que siempre se
+# puede volver a la que se usó en un cierre pasado.
+#
+#   dbo.ReservasQES_Cargas    carga_id · usuario · equipo · fecha · fuente ·
+#                             archivo · hoja · sha256 · periodo_min/max · filas
+#   dbo.ReservasQES_Detalle   carga_id · periodo · concepto · cuenta · local · cnsf
+#
+# La conexión es la misma de siempre (autenticación integrada de Windows):
+#     DRIVER={ODBC Driver 17 for SQL Server};SERVER=...;DATABASE=...;Trusted_Connection=yes
+
+
+class Repositorio:
+    """Lectura y escritura de las tablas en el servidor.
+
+    Se apoya en SQLAlchemy, así que el mismo código sirve para SQL Server (lo
+    normal) y para un archivo SQLite (útil para probar sin red: pasa
+    `url="sqlite:///pruebas.db"`).
+    """
+
+    def __init__(self, servidor: str = SERVIDOR, base: str = BASE,
+                 driver: str = DRIVER, url: "str | None" = None,
+                 esquema: "str | None" = None):
+        self.servidor, self.base, self.driver = servidor, base, driver
+        self.url = url
+        self.engine = None
+        self._esquema = esquema
+        self._tablas = None
+
+    # ------------------------------------------------------------- conexión
+    def cadena(self) -> str:
+        """La URL de SQLAlchemy. Sin `url` explícita, SQL Server con Trusted_Connection."""
+        if self.url:
+            return self.url
+        params = urllib.parse.quote_plus(
+            f"DRIVER={{{self.driver}}};"
+            f"SERVER={self.servidor};"
+            f"DATABASE={self.base};"
+            "Trusted_Connection=yes;"
+        )
+        return f"mssql+pyodbc:///?odbc_connect={params}"
+
+    @property
+    def esquema(self) -> "str | None":
+        if self._esquema is not None:
+            return self._esquema or None
+        return "dbo" if self.cadena().startswith("mssql") else None
+
+    def conectar(self) -> str:
+        """Abre la conexión y devuelve con qué servidor se habló. Lanza si no puede."""
+        try:
+            from sqlalchemy import create_engine, text
+        except ImportError as err:
+            raise RuntimeError(
+                "Falta SQLAlchemy. En una celda: !pip install sqlalchemy pyodbc"
+            ) from err
+        self.engine = create_engine(self.cadena(), future=True)
+        with self.engine.connect() as conn:
+            if self.cadena().startswith("mssql"):
+                fila = conn.execute(text("SELECT @@SERVERNAME, DB_NAME(), SUSER_SNAME()")).one()
+                return f"{fila[0]} · base {fila[1]} · como {fila[2]}"
+            return f"SQLite · {self.cadena()}"
+
+    def _asegura(self):
+        if self.engine is None:
+            raise RuntimeError("No hay conexión: pica «Conectar» primero.")
+        return self.engine
+
+    # -------------------------------------------------------------- esquema
+    def tablas(self):
+        """Define (sin crear) las dos tablas. Se memoriza para no rehacerlas."""
+        if self._tablas is not None:
+            return self._tablas
+        from sqlalchemy import (Column, DateTime, ForeignKey, Integer, MetaData,
+                                Numeric, PrimaryKeyConstraint, String, Table)
+        md = MetaData(schema=self.esquema)
+        cargas = Table(
+            TABLA_CARGAS, md,
+            Column("carga_id", Integer, primary_key=True, autoincrement=True),
+            Column("usuario", String(128), nullable=False),
+            Column("equipo", String(128)),
+            Column("fecha_carga", DateTime, nullable=False),
+            Column("fuente", String(16), nullable=False),        # balanza | actuarios
+            Column("archivo", String(260), nullable=False),
+            Column("hoja", String(200)),
+            Column("sha256", String(64), nullable=False),
+            Column("periodo_min", String(10)),
+            Column("periodo_max", String(10)),
+            Column("filas", Integer),
+            Column("nota", String(400)),
+        )
+        detalle = Table(
+            TABLA_DETALLE, md,
+            Column("carga_id", Integer,
+                   ForeignKey(f"{cargas.fullname}.carga_id"), nullable=False),
+            Column("periodo", String(10), nullable=False),
+            Column("concepto", String(8), nullable=False),
+            Column("cuenta", String(8)),
+            Column("etiqueta", String(80)),
+            Column("local", Numeric(20, 6)),
+            Column("cnsf", Numeric(20, 6)),
+            PrimaryKeyConstraint("carga_id", "periodo", "concepto"),
+        )
+        self._tablas = (md, cargas, detalle)
+        return self._tablas
+
+    def existe_esquema(self) -> bool:
+        """¿Están ya las dos tablas? La primera vez, claro que no."""
+        from sqlalchemy import inspect
+        hay = set(inspect(self._asegura()).get_table_names(schema=self.esquema))
+        return {TABLA_CARGAS, TABLA_DETALLE} <= hay
+
+    def crear_esquema(self) -> "list[str]":
+        """Crea las tablas si no existen. Es seguro repetirlo."""
+        from sqlalchemy import inspect
+        eng = self._asegura()
+        md, cargas, detalle = self.tablas()
+        antes = set(inspect(eng).get_table_names(schema=self.esquema))
+        md.create_all(eng, checkfirst=True)
+        despues = set(inspect(eng).get_table_names(schema=self.esquema))
+        nuevas = sorted(despues - antes)
+        return nuevas or []
+
+    # -------------------------------------------------------------- subidas
+    def ya_subido(self, sha: str) -> "list[int]":
+        """Cargas anteriores con la misma huella: el archivo ya está en el servidor."""
+        from sqlalchemy import select
+        eng = self._asegura()
+        _, cargas, _ = self.tablas()
+        with eng.connect() as conn:
+            return [r[0] for r in conn.execute(
+                select(cargas.c.carga_id).where(cargas.c.sha256 == sha))]
+
+    def subir(self, lec: Lectura, usuario: "str | None" = None,
+              nota: "str | None" = None) -> int:
+        """Guarda la lectura como una carga nueva y devuelve su carga_id."""
+        from sqlalchemy import insert
+        eng = self._asegura()
+        _, cargas, detalle = self.tablas()
+        etiquetas = {c.id: (c.cuenta, c.label) for c in CONCEPTOS}
+
+        filas = []
+        for p in lec.cortes:
+            src = lec.periodos[p]
+            for cid in sorted(set(src["local"]) | set(src["cnsf"])):
+                cuenta, label = etiquetas.get(cid, (None, cid))
+                filas.append({"periodo": p, "concepto": cid, "cuenta": cuenta,
+                              "etiqueta": label,
+                              "local": src["local"].get(cid),
+                              "cnsf": src["cnsf"].get(cid)})
+        if not filas:
+            raise ValueError(f"{lec.archivo}: no hay importes que subir.")
+
+        cab = {
+            "usuario": usuario or getpass.getuser(),
+            "equipo": platform.node()[:128],
+            "fecha_carga": dt.datetime.now(),
+            "fuente": lec.fuente,
+            "archivo": lec.archivo[:260],
+            "hoja": (lec.hoja or "")[:200],
+            "sha256": lec.sha256,
+            "periodo_min": lec.cortes[0],
+            "periodo_max": lec.cortes[-1],
+            "filas": len(filas),
+            "nota": (nota or "")[:400] or None,
+        }
+        with eng.begin() as conn:      # todo o nada: cabecera y detalle juntos
+            carga_id = conn.execute(insert(cargas), cab).inserted_primary_key[0]
+            conn.execute(insert(detalle),
+                         [dict(f, carga_id=carga_id) for f in filas])
+        return int(carga_id)
+
+    # ------------------------------------------------------------ consultas
+    def snapshots(self) -> "list[dict[str, Any]]":
+        """Una fila por (carga, corte): lo que el usuario puede elegir para la vista.
+
+        Sin tablas todavía devuelve vacío: es el estado normal la primera vez,
+        no un error que haya que enseñarle a nadie.
+        """
+        from sqlalchemy import func, select
+        eng = self._asegura()
+        if not self.existe_esquema():
+            return []
+        _, cargas, detalle = self.tablas()
+        q = (select(cargas.c.carga_id, detalle.c.periodo, cargas.c.usuario,
+                    cargas.c.fecha_carga, cargas.c.fuente, cargas.c.archivo,
+                    func.count().label("conceptos"))
+             .select_from(cargas.join(detalle, cargas.c.carga_id == detalle.c.carga_id))
+             .group_by(cargas.c.carga_id, detalle.c.periodo, cargas.c.usuario,
+                       cargas.c.fecha_carga, cargas.c.fuente, cargas.c.archivo)
+             .order_by(detalle.c.periodo.desc(), cargas.c.fecha_carga.desc()))
+        with eng.connect() as conn:
+            return [dict(r._mapping) for r in conn.execute(q)]
+
+    def importes(self, carga_id: int, periodo: str) -> "dict[str, dict[str, float]]":
+        """Los importes de un corte dentro de una carga."""
+        from sqlalchemy import select
+        eng = self._asegura()
+        _, _, detalle = self.tablas()
+        q = select(detalle.c.concepto, detalle.c.local, detalle.c.cnsf).where(
+            (detalle.c.carga_id == carga_id) & (detalle.c.periodo == periodo))
+        out = {"local": {}, "cnsf": {}}
+        with eng.connect() as conn:
+            for cid, loc, cnsf in conn.execute(q):
+                if loc is not None:
+                    out["local"][cid] = float(loc)
+                if cnsf is not None:
+                    out["cnsf"][cid] = float(cnsf)
+        return out
+
+    # --------------------------------------------------- armado del histórico
+    def historico(self, seleccion: "Sequence[tuple[str, int]] | None" = None,
+                  ruta_json: "str | Path" = HIST_JSON) -> Historico:
+        """Arma un Historico con lo que hay en el servidor.
+
+        `seleccion` son los pares (periodo, carga_id) que el usuario eligió para
+        las ranuras de la vista; sin ella se toma, de cada corte, la carga más
+        reciente. La columna local sale de la carga elegida (una balanza, si la
+        hay) y la estatutaria de la carga de actuarios más nueva de ese corte.
+        """
+        snaps = self.snapshots()
+        h = Historico(ruta_json)
+        h.datos = {}
+        if not snaps:
+            return h
+
+        # la carga de actuarios más nueva por corte: de ahí sale siempre la CNSF
+        act = {}
+        for s in snaps:
+            if s["fuente"] == "actuarios" and s["periodo"] not in act:
+                act[s["periodo"]] = s
+
+        if seleccion is None:
+            elegidas = {}
+            for s in snaps:                       # snapshots ya viene de más nueva a más vieja
+                elegidas.setdefault(s["periodo"], s)
+            pares = [(p, elegidas[p]["carga_id"]) for p in sorted(elegidas)]
+        else:
+            pares = [(p, cid) for p, cid in seleccion if p]
+
+        por_id = {(s["carga_id"], s["periodo"]): s for s in snaps}
+        for periodo, carga_id in pares:
+            e = h._entrada(periodo)
+            s = por_id.get((carga_id, periodo))
+            if s is not None:
+                vals = self.importes(carga_id, periodo)
+                e["local"].update(vals["local"])
+                e["cnsf"].update(vals["cnsf"])
+                e["origen"]["local"] = (f"{s['fuente'].capitalize()} · {s['archivo']} "
+                                        f"· {s['usuario']} · #{carga_id}")
+                if vals["cnsf"]:
+                    e["origen"]["cnsf"] = e["origen"]["local"]
+            a = act.get(periodo)
+            if a is not None and a["carga_id"] != carga_id:
+                vals = self.importes(a["carga_id"], periodo)
+                e["cnsf"].update(vals["cnsf"])
+                e["local_actuarios"] = vals["local"]
+                e["origen"]["cnsf"] = (f"Actuarios · {a['archivo']} · {a['usuario']} "
+                                       f"· #{a['carga_id']}")
+                for cid, val in vals["local"].items():
+                    e["local"].setdefault(cid, val)
+            elif a is not None:
+                e["local_actuarios"] = self.importes(carga_id, periodo)["local"]
+            h._revisar(e)
+        return h
 
 
 # -----------------------------------------------------------------------------
@@ -997,6 +1350,280 @@ def construir_html(hist: Historico, periodos: "Sequence[str] | None" = None,
 """
 
 
+# -----------------------------------------------------------------------------
+# 7 bis. La evolución de la diferencia mes con mes (el botón «Ver evolución»)
+# -----------------------------------------------------------------------------
+
+# Colores de serie: salen de la paleta de la casa, pero elegidos entre los pasos
+# que separan bien para daltonismo (vino oscuro contra azul claro, ΔE 25 en
+# deuteranopia). Aun así van con leyenda y etiqueta directa: el color nunca es
+# la única pista de qué es cada cosa.
+SERIE_COLOR = {"rrc": "#3E8AA6", "rsnr": "#5B1A44", "rsr": "#16252D"}
+
+
+def _paso_bonito(v: float) -> float:
+    """Un escalón de rejilla que caiga en números redondos."""
+    if v <= 0:
+        return 1.0
+    import math
+    exp = math.floor(math.log10(v))
+    base = v / (10 ** exp)
+    for corte in (1, 2, 2.5, 5, 10):
+        if base <= corte:
+            return corte * (10 ** exp)
+    return 10 ** (exp + 1)
+
+
+def _svg_evolucion(hist: Historico, periodos: "Sequence[str]", fx: float) -> str:
+    """Columnas apiladas: la diferencia de cada corte, abierta por reserva.
+
+    Las columnas se dibujan primero y los globos del cursor después, todos al
+    final: en SVG no hay z-index, así que lo único que decide qué tapa a qué es
+    el orden. Cada globo se enciende con el `~` de CSS desde su columna.
+    """
+    ps = [p for p in periodos if hist.completo(p)]
+    if len(ps) < 2:
+        return '<p class="chart-note">Hacen falta al menos dos cortes completos.</p>'
+
+    # solo las reservas que mueven la aguja en algún mes
+    series = [c for c in CONCEPTOS
+              if any(abs(hist.diferencia(p, c.id) or 0) >= 5000 for p in ps)]
+    totales = [(hist.diferencia(p) or 0.0) / 1e6 for p in ps]
+    tope = (max(totales) * 1.18) or 1.0
+    paso = _paso_bonito(tope / 4)
+
+    W, H = 980, 430
+    L, R, T, B = 62, 22, 34, 74
+    alto_util = H - T - B
+
+    def y(v: float) -> float:
+        return T + alto_util * (1 - v / tope)
+
+    hueco = (W - L - R) / len(ps)
+    bw = min(64.0, hueco * 0.62)
+
+    reglas = "\n".join(f".ev .c{i}:hover ~ .t{i}{{opacity:1}}" for i in range(len(ps)))
+    o = [f'<svg class="ev" viewBox="0 0 {W} {H}" role="img" '
+         f'aria-label="Diferencia entre metodologías por corte, en millones de USD">',
+         f'<style>{reglas}</style>']
+
+    # rejilla recesiva, detrás de todo
+    n = 0
+    while n * paso <= tope:
+        yy = y(n * paso)
+        o.append(f'<line x1="{L}" y1="{yy:.1f}" x2="{W - R}" y2="{yy:.1f}" '
+                 f'stroke="{LINE_SOFT}" stroke-width="1" />')
+        o.append(f'<text x="{L - 10}" y="{yy + 4:.1f}" text-anchor="end" fill="{INK_3}" '
+                 f'font-family="Consolas,monospace" font-size="10.5">{n * paso:,.2f}</text>')
+        n += 1
+    o.append(f'<line x1="{L}" y1="{y(0):.1f}" x2="{W - R}" y2="{y(0):.1f}" '
+             f'stroke="{LINE}" stroke-width="1.5" />')
+    o.append(f'<text x="{L - 10}" y="{T - 14}" text-anchor="end" fill="{INK_3}" '
+             f'font-family="Consolas,monospace" font-size="10.5">MM USD</text>')
+
+    # --- las columnas ---------------------------------------------------
+    desglose = []
+    for i, p in enumerate(ps):
+        cx = L + hueco * i + hueco / 2
+        acum, trozos = 0.0, []
+        for c in series:
+            v = (hist.diferencia(p, c.id) or 0.0) / 1e6
+            if abs(v) < 0.005:
+                continue
+            trozos.append((c, v, acum))
+            acum += v
+        desglose.append((cx, trozos))
+
+        o.append(f'<g class="col c{i}">')
+        # el blanco del cursor es toda la banda de la columna, no solo la barra
+        o.append(f'<rect class="hit" x="{cx - hueco / 2:.1f}" y="{T}" '
+                 f'width="{hueco:.1f}" height="{alto_util:.1f}" />')
+        for k, (c, v, base) in enumerate(trozos):
+            y0, y1 = y(base + v), y(base)
+            arriba = k == len(trozos) - 1
+            alto = max(2.0, y1 - y0 - (0 if arriba else 2))   # 2px de aire entre segmentos
+            o.append(f'<rect class="seg" x="{cx - bw / 2:.1f}" y="{y0:.1f}" '
+                     f'width="{bw:.1f}" height="{alto:.1f}" '
+                     f'fill="{SERIE_COLOR.get(c.id, TEAL)}" rx="{4 if arriba else 0}" />')
+        tot = totales[i]
+        o.append(f'<text x="{cx:.1f}" y="{y(tot) - 10:.1f}" text-anchor="middle" '
+                 f'fill="{INK}" font-family="Consolas,monospace" font-size="12" '
+                 f'font-weight="500">{tot:,.2f}</text>')
+        o.append(f'<text x="{cx:.1f}" y="{H - B + 20}" text-anchor="middle" fill="{INK_2}" '
+                 f'font-family="Segoe UI,sans-serif" font-size="11">'
+                 f'{esc(etiqueta_corta(p).split(" ")[0][:3])}</text>')
+        o.append(f'<text x="{cx:.1f}" y="{H - B + 34}" text-anchor="middle" fill="{INK_3}" '
+                 f'font-family="Segoe UI,sans-serif" font-size="10">'
+                 f'{esc(p.split("-")[0])}</text>')
+        o.append("</g>")
+
+    # --- los globos, hasta el final para que nada los tape ---------------
+    for i, p in enumerate(ps):
+        cx, trozos = desglose[i]
+        tot = totales[i]
+        ancho_t, alto_t = 224, 46 + 15 * len(trozos)
+        tx = min(max(cx - ancho_t / 2, L), W - R - ancho_t)
+        ty = max(y(tot) - alto_t - 20, 2)
+        o.append(f'<g class="tip t{i}">')
+        o.append(f'<rect x="{tx:.1f}" y="{ty:.1f}" width="{ancho_t}" height="{alto_t}" '
+                 f'rx="5" fill="{INK}" opacity="0.97" />')
+        o.append(f'<text x="{tx + 11:.1f}" y="{ty + 19:.1f}" fill="#fff" '
+                 f'font-family="Segoe UI,sans-serif" font-size="11.5" font-weight="600">'
+                 f'{esc(etiqueta_periodo(p))}</text>')
+        for k, (c, v, _b) in enumerate(trozos):
+            yy = ty + 36 + 15 * k
+            o.append(f'<rect x="{tx + 11:.1f}" y="{yy - 8:.1f}" width="8" height="8" rx="2" '
+                     f'fill="{SERIE_COLOR.get(c.id, TEAL)}" />')
+            o.append(f'<text x="{tx + 25:.1f}" y="{yy:.1f}" fill="#D7E3EA" '
+                     f'font-family="Segoe UI,sans-serif" font-size="10.5">'
+                     f'{esc(c.label.replace("Reserva de ", ""))}</text>')
+            o.append(f'<text x="{tx + ancho_t - 11:.1f}" y="{yy:.1f}" text-anchor="end" '
+                     f'fill="#fff" font-family="Consolas,monospace" font-size="10.5">'
+                     f'{v:,.2f}</text>')
+        yy = ty + 36 + 15 * len(trozos)
+        o.append(f'<text x="{tx + 11:.1f}" y="{yy:.1f}" fill="#9FB6C2" '
+                 f'font-family="Segoe UI,sans-serif" font-size="10.5">Total</text>')
+        o.append(f'<text x="{tx + ancho_t - 11:.1f}" y="{yy:.1f}" text-anchor="end" '
+                 f'fill="#fff" font-family="Consolas,monospace" font-size="11" '
+                 f'font-weight="600">{tot:,.2f}  ·  MXN {tot * fx:,.2f}</text>')
+        o.append("</g>")
+
+    o.append("</svg>")
+    return "\n".join(o)
+
+
+def construir_html_evolucion(hist: Historico, periodos: "Sequence[str] | None" = None,
+                             fx: float = FX_DEFAULT) -> str:
+    """La página de la evolución: el gráfico más la tabla que lo respalda."""
+    ps = list(periodos) if periodos else hist.periodos()
+    completos = [p for p in ps if hist.completo(p)]
+    if not completos:
+        raise ValueError("No hay ningún corte con las dos fuentes cargadas.")
+
+    series = [c for c in CONCEPTOS
+              if any(abs(hist.diferencia(p, c.id) or 0) >= 5000 for p in completos)]
+    leyenda = "".join(
+        f'<span class="chip"><i style="background:{SERIE_COLOR.get(c.id, TEAL)}"></i>'
+        f'{esc(c.label.replace("Reserva de ", ""))}</span>' for c in series)
+
+    enc = "".join(f"<th>{esc(etiqueta_corta(p))}</th>" for p in completos)
+    filas = ""
+    for c in series:
+        filas += f"<tr><th>{esc(c.label)}</th>" + "".join(
+            f"<td>{celda_mm(hist.diferencia(p, c.id))}</td>" for p in completos) + "</tr>"
+    filas += ('<tr class="total"><th>Diferencia total</th>'
+              + "".join(f"<td>{celda_mm(hist.diferencia(p))}</td>" for p in completos)
+              + "</tr>")
+    filas += ('<tr class="var"><th>Variación contra el corte anterior</th>'
+              + "".join(
+                  f"<td>{celda_mm(None if i == 0 else (hist.diferencia(p) or 0) - (hist.diferencia(completos[i - 1]) or 0))}</td>"
+                  for i, p in enumerate(completos)) + "</tr>")
+
+    d_ini, d_fin = hist.diferencia(completos[0]) or 0.0, hist.diferencia(completos[-1]) or 0.0
+    v = d_fin - d_ini
+    pct = f'{"+" if v >= 0 else "−"}{abs(v / d_ini * 100):.1f}%' if d_ini else "n/d"
+    sello = dt.datetime.now().strftime("%d/%m/%Y %H:%M")
+    omitidos = [p for p in ps if p not in completos]
+
+    css_extra = """
+.ev{width:100%;max-width:980px;height:auto;display:block}
+.ev .hit{fill:transparent}
+.ev .tip{opacity:0;pointer-events:none;transition:opacity .12s}
+.ev .col:hover .tip{opacity:1}
+.ev .col:hover .seg{filter:brightness(1.12)}
+.legend{display:flex;flex-wrap:wrap;gap:16px;margin:2px 0 6px}
+.chip{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;color:var(--ink-2)}
+.chip i{width:11px;height:11px;border-radius:3px;display:inline-block}
+table.ev-t{border-collapse:collapse;width:100%;min-width:640px;
+           font-variant-numeric:tabular-nums;margin-top:4px}
+table.ev-t th,table.ev-t td{padding:7px 11px;font-size:12.5px;
+                            border-bottom:1px solid var(--line-soft);text-align:right}
+table.ev-t thead th{background:var(--ice);color:var(--teal);font-size:11px;
+                    text-transform:uppercase;letter-spacing:.05em}
+table.ev-t tbody th{text-align:left;font-weight:500;color:var(--ink)}
+table.ev-t tbody td{font-family:var(--mono);color:var(--ink)}
+table.ev-t tr.total th,table.ev-t tr.total td{background:var(--teal);color:#fff;font-weight:700}
+table.ev-t tr.var td{color:var(--ink-2);font-size:12px}
+table.ev-t tr.var th{font-weight:400;color:var(--ink-2);font-size:12px}
+"""
+
+    return f"""<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Evolución de la diferencia · Reservas QES</title>
+<style>{CSS}{css_extra}</style>
+</head>
+<body>
+<div class="wrap">
+  <section class="board">
+    <div class="board-head">
+      <div>
+        <h2>Evolución de la diferencia</h2>
+        <p class="tag">Método Estatutario CNSF menos Metodología local, corte a corte</p>
+        <p class="fx">Tipo de cambio: {fx:,.4f} MXN / USD</p>
+      </div>
+      <div class="kpis">
+        <div class="kpi"><div class="k-label">Diferencia al último corte</div>
+          <div class="k-scope">{esc(etiqueta_corta(completos[-1]))}</div>
+          <div class="k-value">USD {mm(d_fin)} <span class="u">MM</span></div>
+          <div class="k-alt">~MXN {d_fin * fx / 1e6:,.2f} MM</div></div>
+        <div class="kpi accent"><div class="k-label">Desde el primer corte</div>
+          <div class="k-scope">{esc(etiqueta_corta(completos[0]))} → {esc(etiqueta_corta(completos[-1]))}</div>
+          <div class="k-value">{"+" if v >= 0 else "−"}USD {mm(abs(v))} <span class="u">MM</span></div>
+          <div class="k-alt">{pct} sobre USD {mm(d_ini)} MM</div></div>
+        <div class="kpi"><div class="k-label">Cortes graficados</div>
+          <div class="k-scope">con las dos fuentes cargadas</div>
+          <div class="k-value">{len(completos)}</div>
+          <div class="k-alt">de {len(ps)} en el histórico</div></div>
+      </div>
+    </div>
+
+    <div class="band" style="grid-template-columns:1fr">
+      <div class="panel">
+        <h3>Diferencia por corte, abierta por reserva</h3>
+        <div class="legend">{leyenda}</div>
+        {_svg_evolucion(hist, completos, fx)}
+        <p class="chart-note">Millones de USD · pasa el cursor por una columna para
+           ver el desglose{'' if not omitidos else ' · sin graficar: ' + esc(', '.join(etiqueta_corta(p) for p in omitidos)) + ' (falta una de las dos fuentes)'}</p>
+      </div>
+    </div>
+
+    <div class="band" style="grid-template-columns:1fr">
+      <div class="panel">
+        <h3>Las mismas cifras, en tabla</h3>
+        <div class="table-wrap">
+          <table class="ev-t">
+            <thead><tr><th style="text-align:left">Reserva</th>{enc}</tr></thead>
+            <tbody>{filas}</tbody>
+          </table>
+        </div>
+        <p class="chart-note">Millones de USD. El guion marca los cortes sin diferencia.</p>
+      </div>
+    </div>
+  </section>
+  <footer class="credits">Reservas técnicas QES · armado en local el {sello}</footer>
+</div>
+</body>
+</html>
+"""
+
+
+def escribir_evolucion(hist: Historico, destino: "str | Path | None" = None,
+                       periodos: "Sequence[str] | None" = None,
+                       fx: float = FX_DEFAULT, abrir: bool = True) -> Path:
+    """Escribe y abre la página de la evolución de la diferencia."""
+    ruta = Path(destino) if destino else hist.ruta.parent / "evolucion_diferencia.html"
+    ruta.write_text(construir_html_evolucion(hist, periodos, fx), encoding="utf-8")
+    if abrir:
+        try:
+            webbrowser.open_new_tab(ruta.resolve().as_uri())
+        except Exception:
+            pass
+    return ruta
+
+
 def escribir_vista(hist: Historico, destino: "str | Path | None" = None,
                    periodos: "Sequence[str] | None" = None, fx: float = FX_DEFAULT,
                    nota: str = NOTA_RELEVANTE, abrir: bool = True) -> Path:
@@ -1036,14 +1663,19 @@ contenedor: ahí no hay escritorio donde dibujar. Opciones:
 """
 
 
-def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True):
-    """Abre la ventana de carga. Es lo que corre la última línea del bloque.
+def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
+                  url_bd: "str | None" = None):
+    """Abre la ventana de trabajo. Es lo que corre la última línea del bloque.
 
-    Se cargan los dos Excel (botón, o arrastrando si está instalado tkinterdnd2),
-    se ve qué se leyó de cada uno y el botón «Procesar» escribe el HTML.
+    De arriba abajo: se cargan los dos Excel, se ven cuáles se leyeron, se suben
+    al servidor de auditoría, se eligen las tres tablas de la vista
+    (Diciembre · t-1 · t) y se arma el HTML.
+
+    `url_bd` sirve para apuntar a un SQLite en vez de a SQL Server, para probar
+    sin red: abrir_ventana(url_bd="sqlite:///pruebas.db").
     """
     import tkinter as tk
-    from tkinter import filedialog, ttk
+    from tkinter import filedialog, messagebox, ttk
 
     try:
         try:
@@ -1067,70 +1699,134 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True):
     root.configure(bg=GROUND)
     # nada de tamaños fijos: en una laptop de 1366x768 la ventana se saldría de la pantalla
     pw, ph = root.winfo_screenwidth(), root.winfo_screenheight()
-    ancho = max(560, min(1000, pw - 80))
-    alto = max(420, min(720, ph - 120))
-    root.geometry(f"{ancho}x{alto}+{max(0, (pw - ancho) // 2)}+{max(0, (ph - alto) // 3)}")
-    root.minsize(520, 400)
+    ancho = max(600, min(1060, pw - 80))
+    alto = max(460, min(760, ph - 110))
+    root.geometry(f"{ancho}x{alto}+{max(0, (pw - ancho) // 2)}+{max(0, (ph - alto) // 4)}")
+    root.minsize(560, 420)
 
     hist = Historico(hist_ruta)
-    pendientes: "dict[str, dict[str, Any]]" = {}     # ruta -> {tipo, hojas, resumen}
-    estado: "dict[str, Any]" = {"fx": FX_DEFAULT, "nota": NOTA_RELEVANTE}
+    repo = Repositorio(url=url_bd)
+    pendientes: "dict[str, Lectura]" = {}
+    estado: "dict[str, Any]" = {"conectado": False, "snapshots": [], "nota": NOTA_RELEVANTE}
+    ancho_texto = ancho - 90
+
+    # ---------------------------------------------------------- lienzo con barra
+    lienzo = tk.Canvas(root, bg=GROUND, highlightthickness=0)
+    barra_v = ttk.Scrollbar(root, orient="vertical", command=lienzo.yview)
+    cuerpo = tk.Frame(lienzo, bg=GROUND)
+    cuerpo.bind("<Configure>", lambda e: lienzo.configure(scrollregion=lienzo.bbox("all")))
+    ventana_id = lienzo.create_window((0, 0), window=cuerpo, anchor="nw")
+    lienzo.bind("<Configure>", lambda e: lienzo.itemconfigure(ventana_id, width=e.width))
+    lienzo.configure(yscrollcommand=barra_v.set)
+    lienzo.pack(side="left", fill="both", expand=True)
+    barra_v.pack(side="right", fill="y")
+    root.bind_all("<MouseWheel>", lambda e: lienzo.yview_scroll(int(-e.delta / 120), "units"))
+    root.bind_all("<Button-4>", lambda e: lienzo.yview_scroll(-1, "units"))
+    root.bind_all("<Button-5>", lambda e: lienzo.yview_scroll(1, "units"))
+
+    def tarjeta(titulo: "str | None" = None) -> tk.Frame:
+        marco = tk.Frame(cuerpo, bg=PAPER, highlightbackground=LINE, highlightthickness=1)
+        marco.pack(fill="x", padx=14, pady=6)
+        if titulo:
+            tk.Label(marco, text=titulo, bg=PAPER, fg=INK_3,
+                     font=(UI, 8, "bold")).pack(anchor="w", padx=14, pady=(10, 4))
+        return marco
 
     # ------------------------------------------------------------ encabezado
-    cab = tk.Frame(root, bg=GROUND)
-    cab.pack(fill="x", padx=16, pady=(14, 6))
+    cab = tk.Frame(cuerpo, bg=GROUND)
+    cab.pack(fill="x", padx=14, pady=(12, 2))
     tk.Label(cab, text="RESERVAS TÉCNICAS QES", bg=GROUND, fg=PLUM,
              font=(UI, 16, "bold")).pack(anchor="w")
-    tk.Label(cab, text="Carga la balanza de comprobación y el archivo de actuarios; "
-                       "«Procesar» escribe la vista en HTML y la abre en el navegador.",
-             bg=GROUND, fg=INK_2, font=(UI, 9), wraplength=ancho - 60,
+    tk.Label(cab, text="Carga los Excel, súbelos al servidor de auditoría, elige las tres "
+                       "tablas de la vista y arma el HTML.",
+             bg=GROUND, fg=INK_2, font=(UI, 9), wraplength=ancho_texto,
              justify="left").pack(anchor="w")
 
-    # ------------------------------------------------------------ zona de carga
-    marco = tk.Frame(root, bg=PAPER, highlightbackground=LINE, highlightthickness=1)
-    marco.pack(fill="x", padx=16, pady=6)
+    # ------------------------------------------------------- 1. carga de archivos
+    carga = tarjeta()
     zona = tk.Label(
-        marco,
-        text=("Arrastra aquí los dos Excel  ·  o pica para elegirlos"
-              if arrastre else "Pica aquí para elegir los dos Excel"),
+        carga,
+        text=("Arrastra aquí los Excel  ·  o pica para elegirlos"
+              if arrastre else "Pica aquí para elegir los Excel"),
         bg=ICE_2, fg=TEAL, font=(UI, 11, "bold"), height=2,
         relief="ridge", bd=1, cursor="hand2")
     zona.pack(fill="x", padx=14, pady=(14, 4))
-    tk.Label(marco, text="Balanza de comprobación (.xlsx) y resultados de actuarios (.xlsb). "
+    tk.Label(carga, text="Balanza de comprobación (.xlsx) y resultados de actuarios (.xlsb). "
                          "El origen de cada archivo se detecta solo.",
-             bg=PAPER, fg=INK_3, font=(UI, 8), wraplength=ancho - 80,
-             justify="left").pack(anchor="w", padx=14, pady=(0, 10))
+             bg=PAPER, fg=INK_3, font=(UI, 8), wraplength=ancho_texto,
+             justify="left").pack(anchor="w", padx=14, pady=(0, 8))
+    tk.Label(carga, text="LO QUE SE LEYÓ DE CADA ARCHIVO", bg=PAPER, fg=INK_3,
+             font=(UI, 8, "bold")).pack(anchor="w", padx=14)
+    tarjetas = tk.Frame(carga, bg=PAPER)
+    tarjetas.pack(fill="x", padx=14, pady=(4, 12))
 
-    # ------------------------------------------------------------ lo que se leyó
-    lectura = tk.Frame(root, bg=PAPER, highlightbackground=LINE, highlightthickness=1)
-    lectura.pack(fill="x", padx=16, pady=6)
-    tk.Label(lectura, text="LO QUE SE LEYÓ DE CADA ARCHIVO", bg=PAPER, fg=INK_3,
-             font=(UI, 8, "bold")).pack(anchor="w", padx=14, pady=(10, 4))
-    tarjetas = tk.Frame(lectura, bg=PAPER)
-    tarjetas.pack(fill="x", padx=14, pady=(0, 12))
+    # ----------------------------------------------------------- 2. el servidor
+    srv = tarjeta("SERVIDOR DE AUDITORÍA")
+    fila1 = tk.Frame(srv, bg=PAPER)
+    fila1.pack(fill="x", padx=14, pady=(0, 6))
+    tk.Label(fila1, text="Servidor", bg=PAPER, fg=INK_2, font=(UI, 8)).pack(side="left")
+    srv_var = tk.StringVar(value=SERVIDOR)
+    tk.Entry(fila1, textvariable=srv_var, width=18, font=(MONO, 9)).pack(side="left", padx=(6, 14))
+    tk.Label(fila1, text="Base", bg=PAPER, fg=INK_2, font=(UI, 8)).pack(side="left")
+    base_var = tk.StringVar(value=BASE)
+    tk.Entry(fila1, textvariable=base_var, width=14, font=(MONO, 9)).pack(side="left", padx=(6, 14))
+    btn_conectar = ttk.Button(fila1, text="Conectar")
+    btn_conectar.pack(side="left")
+    btn_esquema = ttk.Button(fila1, text="Crear tablas", state="disabled")
+    btn_esquema.pack(side="left", padx=(6, 0))
+    btn_subir = ttk.Button(fila1, text="Subir al servidor", state="disabled")
+    btn_subir.pack(side="left", padx=(6, 0))
 
-    # ------------------------------------------------------------ controles
-    ctl = tk.Frame(root, bg=GROUND)
-    ctl.pack(fill="x", padx=16, pady=(4, 0))
+    lbl_srv = tk.Label(srv, text="Sin conectar · el histórico vive en el JSON local.",
+                       bg=PAPER, fg=INK_3, font=(UI, 8), anchor="w",
+                       wraplength=ancho_texto, justify="left")
+    lbl_srv.pack(fill="x", padx=14, pady=(0, 4))
+    tk.Label(srv, text=f"Autenticación integrada de Windows · tablas {TABLA_CARGAS} y "
+                       f"{TABLA_DETALLE} · cada subida queda como una copia nueva, "
+                       "etiquetada por mes y por usuario.",
+             bg=PAPER, fg=INK_3, font=(UI, 8), anchor="w",
+             wraplength=ancho_texto, justify="left").pack(fill="x", padx=14, pady=(0, 12))
+
+    # -------------------------------------------------- 3. las tres de la vista
+    sel = tarjeta("TABLAS PARA LA VISTA")
+    tk.Label(sel, text="Elige qué tabla va en cada columna. Con el servidor conectado "
+                       "aparece cada copia subida (mes · archivo · usuario · #carga); "
+                       "sin servidor, los cortes del histórico local.",
+             bg=PAPER, fg=INK_3, font=(UI, 8), anchor="w",
+             wraplength=ancho_texto, justify="left").pack(fill="x", padx=14, pady=(0, 8))
+    rejilla = tk.Frame(sel, bg=PAPER)
+    rejilla.pack(fill="x", padx=14, pady=(0, 6))
+    rejilla.columnconfigure(1, weight=1)
+    combos: "dict[str, ttk.Combobox]" = {}
+    for r, (clave, etq) in enumerate(RANURAS):
+        tk.Label(rejilla, text=f"{r + 1}. {etq}", bg=PAPER, fg=TEAL,
+                 font=(UI, 9, "bold"), width=13, anchor="w").grid(row=r, column=0, sticky="w", pady=2)
+        cb = ttk.Combobox(rejilla, state="readonly", font=(UI, 9))
+        cb.grid(row=r, column=1, sticky="ew", pady=2)
+        combos[clave] = cb
+    tk.Frame(sel, bg=PAPER, height=6).pack()
+
+    # -------------------------------------------------------- 4. los controles
+    ctl = tk.Frame(cuerpo, bg=GROUND)
+    ctl.pack(fill="x", padx=14, pady=(4, 0))
     tk.Label(ctl, text="Tipo de cambio MXN/USD", bg=GROUND, fg=INK_3,
              font=(UI, 8, "bold")).pack(side="left")
     fx_var = tk.StringVar(value=f"{FX_DEFAULT:.4f}")
-    tk.Entry(ctl, textvariable=fx_var, width=10, font=(MONO, 9)).pack(side="left", padx=(8, 18))
+    tk.Entry(ctl, textvariable=fx_var, width=10, font=(MONO, 9)).pack(side="left", padx=(8, 16))
     btn_procesar = ttk.Button(ctl, text="Procesar")
     btn_procesar.pack(side="right")
-    ttk.Button(ctl, text="Vaciar histórico",
-               command=lambda: vaciar()).pack(side="right", padx=(0, 8))
+    btn_evol = ttk.Button(ctl, text="Ver evolución")
+    btn_evol.pack(side="right", padx=(0, 6))
+    ttk.Button(ctl, text="Vaciar histórico local",
+               command=lambda: vaciar()).pack(side="right", padx=(0, 6))
 
-    # ------------------------------------------------------------ bitácora
-    caja = tk.Frame(root, bg=PAPER, highlightbackground=LINE, highlightthickness=1)
-    caja.pack(fill="both", expand=True, padx=16, pady=(10, 16))
-    tk.Label(caja, text="BITÁCORA", bg=PAPER, fg=INK_3,
-             font=(UI, 8, "bold")).pack(anchor="w", padx=14, pady=(10, 2))
+    # ------------------------------------------------------------ 5. bitácora
+    caja = tarjeta("BITÁCORA")
     envoltura = tk.Frame(caja, bg=PAPER)
     envoltura.pack(fill="both", expand=True, padx=14, pady=(0, 12))
     barra = ttk.Scrollbar(envoltura, orient="vertical")
     bitacora = tk.Text(envoltura, bg=PAPER, fg=INK_2, font=(MONO, 8), relief="flat",
-                       wrap="word", height=7, yscrollcommand=barra.set,
+                       wrap="word", height=8, yscrollcommand=barra.set,
                        highlightbackground=LINE, highlightthickness=1)
     barra.configure(command=bitacora.yview)
     barra.pack(side="right", fill="y")
@@ -1154,33 +1850,36 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True):
 
     root.report_callback_exception = reporta_error
 
-    # ------------------------------------------------------------ vista previa
+    # ====================================================================
+    #  Lectura de archivos
+    # ====================================================================
     def pinta_tarjetas() -> None:
         for hijo in tarjetas.winfo_children():
             hijo.destroy()
         if not pendientes:
             tk.Label(tarjetas, text="Todavía no hay archivos cargados en esta sesión."
-                                    + (f"  Histórico guardado: {len(hist.periodos())} corte(s)."
+                                    + (f"  Histórico local: {len(hist.periodos())} corte(s)."
                                        if hist.periodos() else ""),
                      bg=PAPER, fg=INK_2, font=(UI, 9), justify="left",
-                     wraplength=ancho - 80).pack(anchor="w")
-            actualiza_boton()
-            return
-        for i, (ruta, info) in enumerate(pendientes.items()):
+                     wraplength=ancho_texto).pack(anchor="w")
+        for i, (ruta, lec) in enumerate(pendientes.items()):
             t = tk.Frame(tarjetas, bg=ICE_2, highlightbackground=LINE, highlightthickness=1)
             t.pack(fill="x", pady=(0 if i == 0 else 6))
-            tk.Label(t, text=info["titulo"], bg=ICE_2, fg=TEAL, font=(UI, 9, "bold"),
+            tk.Label(t, text=lec.titulo, bg=ICE_2, fg=TEAL, font=(UI, 9, "bold"),
                      anchor="w").pack(fill="x", padx=10, pady=(6, 0))
-            tk.Label(t, text=Path(ruta).name, bg=ICE_2, fg=INK_3, font=(MONO, 8),
-                     anchor="w").pack(fill="x", padx=10)
-            tk.Label(t, text=info["resumen"], bg=ICE_2, fg=INK, font=(MONO, 8),
-                     anchor="w", justify="left", wraplength=ancho - 90).pack(
-                fill="x", padx=10, pady=(2, 7))
-        actualiza_boton()
+            tk.Label(t, text=f"{lec.archivo}   ·   sha {lec.sha256[:12]}…", bg=ICE_2,
+                     fg=INK_3, font=(MONO, 8), anchor="w").pack(fill="x", padx=10)
+            tk.Label(t, text=lec.resumen, bg=ICE_2, fg=INK, font=(MONO, 8), anchor="w",
+                     justify="left", wraplength=ancho_texto - 20).pack(fill="x", padx=10, pady=(2, 7))
+        actualiza_botones()
 
-    def actualiza_boton() -> None:
-        listo = bool(pendientes) or bool(hist.periodos())
+    def actualiza_botones() -> None:
+        hay = bool(pendientes)
+        listo = hay or bool(hist.periodos()) or bool(estado["snapshots"])
         btn_procesar.state(["!disabled"] if listo else ["disabled"])
+        btn_evol.state(["!disabled"] if listo else ["disabled"])
+        btn_esquema.state(["!disabled"] if estado["conectado"] else ["disabled"])
+        btn_subir.state(["!disabled"] if (estado["conectado"] and hay) else ["disabled"])
 
     def carga_rutas(rutas: "Iterable[str]") -> None:
         for ruta in rutas:
@@ -1188,41 +1887,13 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True):
             if not ruta:
                 continue
             try:
-                hojas = leer_libro(ruta)
-                bal = parse_balanza(hojas, Path(ruta).name)
-                if bal is not None:
-                    per = bal.periodo or periodo_de_nombre(Path(ruta).name)
-                    resumen = " · ".join(bal.detalle) or "sin importes"
-                    if bal.faltantes:
-                        resumen += f"  ·  SIN CUENTA {', '.join(bal.faltantes)}"
-                    pendientes[ruta] = {
-                        "tipo": "balanza", "hojas": hojas,
-                        "titulo": f"Balanza de comprobación  ·  {etiqueta_periodo(per) if per else 'periodo sin identificar'}",
-                        "resumen": f"hoja «{bal.hoja}»  ·  {resumen}",
-                    }
-                    apunta(f"· {Path(ruta).name}: balanza leída "
-                           f"({etiqueta_periodo(per) if per else 'periodo sin identificar'})", "ok")
-                    if not per:
-                        apunta("  no se identificó el periodo: renómbrala como "
-                               "Balanza_MMAAAA.xlsx", "warn")
-                    continue
-
-                act = parse_actuarios(hojas)
-                if not act.periodos:
-                    apunta(f"! {Path(ruta).name}: no se reconoció ni como balanza (falta la "
-                           "columna CUENTA) ni como archivo de actuarios (faltan los tres "
-                           "conceptos de reserva).", "err")
-                    continue
-                cortes = sorted(act.periodos)
-                pendientes[ruta] = {
-                    "tipo": "actuarios", "hojas": hojas,
-                    "titulo": f"Archivo de actuarios  ·  {len(cortes)} corte(s)",
-                    "resumen": ("cortes: " + ", ".join(etiqueta_corta(p) for p in cortes)
-                                + "\nhojas: " + ", ".join(act.hojas)),
-                }
-                apunta(f"· {Path(ruta).name}: actuarios, {len(cortes)} corte(s) "
-                       f"({', '.join(etiqueta_corta(p) for p in cortes)})", "ok")
-            except Exception as err:      # se reporta en la bitácora, la ventana sigue viva
+                lec = leer_fuente(ruta)
+                pendientes[ruta] = lec
+                apunta(f"· {lec.archivo}: {lec.fuente}, "
+                       + (", ".join(etiqueta_corta(p) for p in lec.cortes) or "sin cortes"), "ok")
+                if lec.faltantes:
+                    apunta(f"  faltan las cuentas {', '.join(lec.faltantes)}", "warn")
+            except Exception as err:     # se reporta en la bitácora, la ventana sigue viva
                 apunta(f"! {Path(ruta).name}: {err}", "err")
         pinta_tarjetas()
 
@@ -1240,61 +1911,224 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True):
         zona.dnd_bind("<<DragEnter>>", lambda e: zona.configure(bg=ICE))
         zona.dnd_bind("<<DragLeave>>", lambda e: zona.configure(bg=ICE_2))
 
-    # ------------------------------------------------------------ procesar
-    def procesar() -> None:
+    # ====================================================================
+    #  Servidor
+    # ====================================================================
+    def conectar() -> None:
+        repo.servidor, repo.base = srv_var.get().strip(), base_var.get().strip()
+        try:
+            donde = repo.conectar()
+        except Exception as err:
+            estado["conectado"] = False
+            lbl_srv.configure(text="No se pudo conectar.", fg=NEG)
+            apunta(f"! servidor: {err}", "err")
+            actualiza_botones()
+            return
+        estado["conectado"] = True
+        lbl_srv.configure(text=f"Conectado a {donde}", fg="#0E7C66")
+        apunta(f"· conectado a {donde}", "ok")
+        try:
+            if not repo.existe_esquema():
+                apunta("  las tablas todavía no existen en esta base: "
+                       "pica «Crear tablas» una vez y listo.", "warn")
+        except Exception as err:
+            apunta(f"! no se pudo revisar el esquema: {err}", "err")
+        refresca_snapshots()
+
+    def crear_tablas() -> None:
+        try:
+            nuevas = repo.crear_esquema()
+        except Exception as err:
+            apunta(f"! no se pudieron crear las tablas: {err}", "err")
+            return
+        apunta("· tablas creadas: " + ", ".join(nuevas) if nuevas
+               else "· las tablas ya existían, no se tocó nada", "ok")
+        refresca_snapshots()
+
+    def subir() -> None:
+        if not pendientes:
+            apunta("! no hay archivos cargados que subir.", "warn")
+            return
+        for ruta, lec in list(pendientes.items()):
+            try:
+                previas = repo.ya_subido(lec.sha256)
+                if previas and not messagebox.askyesno(
+                        "Reservas técnicas QES",
+                        f"{lec.archivo} ya está en el servidor "
+                        f"(carga{'s' if len(previas) > 1 else ''} "
+                        f"{', '.join('#' + str(c) for c in previas)}).\n\n"
+                        "¿Subir otra copia de todos modos?"):
+                    apunta(f"· {lec.archivo}: no se subió, ya estaba como "
+                           + ", ".join(f"#{c}" for c in previas), "warn")
+                    continue
+                cid = repo.subir(lec)
+                apunta(f"· {lec.archivo} → servidor, carga #{cid} "
+                       f"({len(lec.cortes)} corte(s): "
+                       f"{', '.join(etiqueta_corta(p) for p in lec.cortes)})", "ok")
+            except Exception as err:
+                apunta(f"! {lec.archivo}: no se pudo subir · {err}", "err")
+        refresca_snapshots()
+
+    btn_conectar.configure(command=conectar)
+    btn_esquema.configure(command=crear_tablas)
+    btn_subir.configure(command=subir)
+
+    # ====================================================================
+    #  Las tres tablas de la vista
+    # ====================================================================
+    def opciones() -> "list[tuple[str, tuple[str, int | None]]]":
+        """(etiqueta que se ve, (periodo, carga_id)) para los desplegables."""
+        if estado["conectado"] and estado["snapshots"]:
+            return [(f"{etiqueta_corta(s['periodo'])}  ·  {s['fuente']}  ·  {s['archivo']}"
+                     f"  ·  {s['usuario']}  ·  #{s['carga_id']}",
+                     (s["periodo"], s["carga_id"]))
+                    for s in estado["snapshots"]]
+        return [(f"{etiqueta_periodo(p)}  ·  histórico local", (p, None))
+                for p in reversed(hist.periodos())]
+
+    def refresca_snapshots() -> None:
+        if estado["conectado"]:
+            try:
+                estado["snapshots"] = repo.snapshots()
+                apunta(f"· servidor: {len(estado['snapshots'])} copia(s) disponibles "
+                       f"en {len({s['periodo'] for s in estado['snapshots']})} corte(s)")
+            except Exception as err:
+                estado["snapshots"] = []
+                apunta(f"! no se pudo leer el catálogo: {err}", "err")
+        llena_combos()
+        actualiza_botones()
+
+    def llena_combos() -> None:
+        ops = opciones()
+        estado["ops"] = ops
+        etiquetas = [""] + [e for e, _ in ops]
+        # por omisión: diciembre más reciente, el último corte, y el anterior
+        periodos = []
+        for _e, (p, _c) in ops:
+            if p not in periodos:
+                periodos.append(p)          # ya vienen de más nuevo a más viejo
+        dic = next((p for p in periodos if p.split("-")[1] == "12"), None)
+        t = periodos[0] if periodos else None
+        t1 = next((p for p in periodos[1:] if p != dic), None)
+        por_defecto = {"dic": dic, "t1": t1, "t": t}
+        for clave, cb in combos.items():
+            previo = cb.get()
+            cb.configure(values=etiquetas)
+            if previo and previo in etiquetas:
+                cb.set(previo)          # lo que ya eligió el usuario manda
+                continue
+            objetivo = por_defecto.get(clave)
+            cb.set(next((e for e, (p, _c) in ops if p == objetivo), "") if objetivo else "")
+
+    def seleccion() -> "list[tuple[str, int | None]]":
+        """Los tres pares (periodo, carga) elegidos, en el orden de la matriz."""
+        mapa = dict(estado.get("ops", []))
+        out = []
+        for clave, _etq in RANURAS:
+            v = combos[clave].get()
+            if v and v in mapa and mapa[v] not in out:
+                out.append(mapa[v])
+        return out
+
+    def historico_de_la_vista() -> "tuple[Historico, list[str]]":
+        """El Historico y los periodos que le tocan, según lo elegido arriba."""
+        pares = seleccion()
+        if estado["conectado"] and estado["snapshots"] and pares:
+            h = repo.historico([(p, c) for p, c in pares if c is not None],
+                               ruta_json=hist.ruta)
+            return h, [p for p, _c in pares]
+        ps = [p for p, _c in pares] or hist.periodos()[-PERIODOS_EN_VISTA:]
+        return hist, [p for p in ps if p in hist.datos]
+
+    # ====================================================================
+    #  Acciones
+    # ====================================================================
+    def tipo_de_cambio() -> float:
         try:
             fx = float(fx_var.get().replace(",", ""))
             if fx <= 0:
                 raise ValueError
+            return fx
         except ValueError:
-            apunta(f"! Tipo de cambio no válido: «{fx_var.get()}». Se usa {FX_DEFAULT}.", "warn")
-            fx = FX_DEFAULT
+            apunta(f"! tipo de cambio no válido: «{fx_var.get()}». Se usa {FX_DEFAULT}.", "warn")
+            return FX_DEFAULT
 
-        # la balanza manda para la columna local: se funde después de los actuarios
-        orden = sorted(pendientes.items(), key=lambda kv: kv[1]["tipo"] != "actuarios")
-        for ruta, info in orden:
+    def funde_pendientes() -> None:
+        # los actuarios primero: para la columna local manda la balanza
+        orden = sorted(pendientes.values(), key=lambda l: l.fuente != "actuarios")
+        for lec in orden:
             try:
-                for aviso in hist.procesar(ruta, info["hojas"]):
+                for aviso in hist.fundir(lec):
                     apunta("· " + aviso,
                            "warn" if "Revisar" in aviso or "SIN CUENTA" in aviso else "")
             except Exception as err:
-                apunta(f"! {Path(ruta).name}: {err}", "err")
-        if not hist.periodos():
-            apunta("! No hay ningún corte en el histórico: carga al menos un archivo.", "err")
-            return
+                apunta(f"! {lec.archivo}: {err}", "err")
+        if orden:
+            hist.guardar()
+            pendientes.clear()
+            pinta_tarjetas()
+            llena_combos()
 
-        hist.guardar()
-        pendientes.clear()
-        pinta_tarjetas()
-        ps = hist.periodos()[-PERIODOS_EN_VISTA:]
-        apunta(f"· histórico guardado en {hist.ruta} ({len(hist.periodos())} corte(s))")
+    def procesar() -> None:
+        fx = tipo_de_cambio()
+        funde_pendientes()
+        h, ps = historico_de_la_vista()
+        if not ps:
+            apunta("! no hay cortes que mostrar: carga un archivo o elige las tablas.", "err")
+            return
+        apunta(f"· histórico local en {hist.ruta} ({len(hist.periodos())} corte(s))")
         try:
-            ruta_html = escribir_vista(hist, periodos=ps, fx=fx, nota=estado["nota"])
+            ruta_html = escribir_vista(h, periodos=ps, fx=fx, nota=estado["nota"])
         except Exception as err:
-            apunta(f"! No se pudo escribir la vista: {err}", "err")
+            apunta(f"! no se pudo escribir la vista: {err}", "err")
             return
         apunta(f"· vista de {', '.join(etiqueta_corta(p) for p in ps)} escrita en "
                f"{ruta_html}", "ok")
+        for p in ps:
+            if h.datos.get(p, {}).get("aviso"):
+                apunta(f"  revisar {etiqueta_periodo(p)}: {h.datos[p]['aviso']}", "warn")
         apunta("· abierta en el navegador. El archivo es autocontenido: se puede mandar "
                "por correo tal cual.", "ok")
 
+    def evolucion() -> None:
+        fx = tipo_de_cambio()
+        funde_pendientes()
+        if estado["conectado"] and estado["snapshots"]:
+            h = repo.historico(ruta_json=hist.ruta)   # todo lo que haya en el servidor
+        else:
+            h = hist
+        try:
+            ruta_html = escribir_evolucion(h, fx=fx)
+        except Exception as err:
+            apunta(f"! no se pudo dibujar la evolución: {err}", "err")
+            return
+        apunta(f"· evolución de {len([p for p in h.periodos() if h.completo(p)])} corte(s) "
+               f"escrita en {ruta_html}", "ok")
+
     def vaciar() -> None:
-        from tkinter import messagebox
-        if messagebox.askyesno("Reservas técnicas QES", "¿Vaciar todo el histórico guardado?"):
+        if messagebox.askyesno("Reservas técnicas QES",
+                               "¿Vaciar el histórico local?\n\n"
+                               "Lo que ya está en el servidor no se toca."):
             hist.datos.clear()
             hist.guardar()
-            apunta("· histórico vaciado", "warn")
-            pinta_tarjetas()
+            apunta("· histórico local vaciado (el servidor queda intacto)", "warn")
+            llena_combos()
+            actualiza_botones()
 
     btn_procesar.configure(command=procesar)
+    btn_evol.configure(command=evolucion)
 
-    apunta(f"· histórico: {Path(hist_ruta).resolve()} ({len(hist.periodos())} corte(s))")
+    # ------------------------------------------------------------ arranque
+    apunta(f"· histórico local: {Path(hist_ruta).resolve()} ({len(hist.periodos())} corte(s))")
     if hist.periodos():
-        apunta("  cortes guardados: " + ", ".join(etiqueta_corta(p) for p in hist.periodos()))
+        apunta("  cortes: " + ", ".join(etiqueta_corta(p) for p in hist.periodos()))
     if not arrastre:
         apunta("  (instala tkinterdnd2 si quieres arrastrar y soltar: pip install tkinterdnd2)",
                "warn")
+    apunta(f"· servidor por conectar: {repo.servidor} · base {repo.base}")
     pinta_tarjetas()
+    llena_combos()
+    actualiza_botones()
 
     # que no nazca detrás del navegador ni del notebook
     try:
