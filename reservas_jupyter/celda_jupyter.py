@@ -1330,112 +1330,118 @@ input.sw{position:absolute;width:0;height:0;opacity:0;pointer-events:none}
 }
 
 
-def _svg_cascada(hist: Historico, actual: str, previo: "str | None",
-                 fx_a: float = FX_DEFAULT, fx_p: float = FX_DEFAULT) -> str:
-    """Gráfico de cascada: corte anterior, incrementos por reserva y corte actual.
+def _svg_cascada(hist: Historico, periodos: "Sequence[str]",
+                 tc: "dict[str, float] | None" = None) -> str:
+    """La cascada encadenada: una barra por corte y, entre cada dos, el
+    movimiento abierto por reserva.
 
+    Con dos cortes es el puente de siempre. Con cuatro son cuatro cascadas
+    unidas, de modo que se ve cómo va caminando la diferencia corte a corte.
     Las barras no cambian al cambiar de moneda —la escala es proporcional—, así
-    que solo se guardan las dos versiones de cada número.
+    que sólo se guardan las dos versiones de cada número.
     """
-    if not previo or not hist.completo(actual) or not hist.completo(previo):
-        return ('<p class="chart-note">Hacen falta dos cortes con las dos fuentes cargadas '
-                'para dibujar la cascada.</p>')
+    ps = [p for p in periodos if hist.completo(p)]
+    if len(ps) < 2:
+        return ('<p class="chart-note">Hacen falta al menos dos cortes con las dos '
+                'fuentes cargadas para dibujar la cascada.</p>')
+    tc = tc or {p: FX_DEFAULT for p in ps}
 
-    W, H, L, R, T, B = 660, 330, 46, 16, 46, 74
-    d0 = (hist.diferencia(previo) or 0.0) / 1e6
-    d1 = (hist.diferencia(actual) or 0.0) / 1e6
+    def dif(p: str, cid: "str | None" = None) -> float:
+        return (hist.diferencia(p, cid) or 0.0) / 1e6
 
-    etq_id = {c.label.replace("Reserva de ", ""): c.id for c in CONCEPTOS}
-    pasos = [("base", etiqueta_corta(previo), "Diferencia total", d0)]
-    for c in CONCEPTOS:
-        v = hist.incremento(actual, previo, c.id)
-        if v is None or abs(v / 1e6) < 0.005:
-            continue
-        v /= 1e6
-        pasos.append(("delta", c.label.replace("Reserva de ", ""),
-                      "Incremento" if v >= 0 else "Disminución", v))
-    pasos.append(("base", etiqueta_corta(actual), "Diferencia total", d1))
+    def dif_mxn(p: str, cid: "str | None" = None) -> float:
+        return (hist.diferencia(p, cid) or 0.0) * tc[p] / 1e6
 
-    corrida, geo, maxv = 0.0, [], max(d0, d1, 0.0001)
-    for tipo, etq, sub, valor in pasos:
+    # --- los peldaños: base, movimientos por reserva, base, y así -----------
+    pasos = [("base", etiqueta_corta(ps[0]), "Diferencia total",
+              dif(ps[0]), dif_mxn(ps[0]))]
+    for a, b in zip(ps, ps[1:]):
+        for c in CONCEPTOS:
+            v, v_mxn = dif(b, c.id) - dif(a, c.id), dif_mxn(b, c.id) - dif_mxn(a, c.id)
+            if abs(v) < 0.005:
+                continue
+            pasos.append(("delta", c.label.replace("Reserva de ", ""),
+                          "Incremento" if v >= 0 else "Disminución", v, v_mxn))
+        pasos.append(("base", etiqueta_corta(b), "Diferencia total", dif(b), dif_mxn(b)))
+
+    # --- geometría ----------------------------------------------------------
+    corrida, geo, maxv = 0.0, [], max(dif(p) for p in ps)
+    for tipo, etq, sub, valor, valor_mxn in pasos:
         if tipo == "base":
-            geo.append((tipo, etq, sub, valor, 0.0, valor))
+            geo.append((tipo, etq, sub, valor, valor_mxn, 0.0, valor))
             corrida = valor
         else:
-            geo.append((tipo, etq, sub, valor, corrida, corrida + valor))
+            geo.append((tipo, etq, sub, valor, valor_mxn, corrida, corrida + valor))
             corrida += valor
             maxv = max(maxv, corrida)
-    tope = maxv * 1.22
+    tope = (maxv * 1.22) or 1.0
+
+    n = len(geo)
+    hueco = 74 if n > 5 else 96          # se aprieta un poco cuando hay muchos
+    L, R, T, B = 52, 18, 46, 78
+    W, H = L + R + hueco * n, 330
+    bw = min(58.0, hueco * 0.54)
 
     def y(v: float) -> float:
         return T + (H - T - B) * (1 - v / tope)
 
-    ancho_util = W - L - R
-    hueco = ancho_util / len(geo)
-    bw = min(70.0, hueco * 0.54)
+    o = [f'<svg class="wf" viewBox="0 0 {W} {H}" role="img" '
+         f'aria-label="Cascada de la diferencia entre metodologías, corte a corte">',
+         f'<line x1="{L - 8}" y1="{y(0):.1f}" x2="{W - R}" y2="{y(0):.1f}" '
+         f'stroke="{LINE}" stroke-width="1" />']
+    for clase, unidad in (("v-usd", "MM USD"), ("v-mxn", "MM MXN")):
+        o.append(f'<text class="{clase}" x="{L - 8}" y="{T - 18}" fill="{INK_3}" '
+                 f'font-family="Consolas,monospace" font-size="11">'
+                 f'Diferencia acumulada ({unidad})</text>')
 
-    partes = [f'<svg class="wf" viewBox="0 0 {W} {H}" role="img" '
-              f'aria-label="Puente de la diferencia entre metodologías">',
-              f'<line x1="{L - 8}" y1="{y(0):.1f}" x2="{W - R}" y2="{y(0):.1f}" '
-              f'stroke="{LINE}" stroke-width="1" />']
-
-    for i, (tipo, etq, sub, valor, y0, y1) in enumerate(geo):
+    for i, (tipo, etq, sub, valor, valor_mxn, y0, y1) in enumerate(geo):
         cx = L + hueco * i + hueco / 2
         ya, yb = y(max(y0, y1)), y(min(y0, y1))
         alto = max(3.0, yb - ya)
         relleno = "#8E2A66" if tipo == "base" else (TEAL_2 if valor >= 0 else NEG)
-        partes.append(f'<rect x="{cx - bw / 2:.1f}" y="{ya:.1f}" width="{bw:.1f}" '
-                      f'height="{alto:.1f}" fill="{relleno}" rx="1" />')
+        o.append(f'<rect x="{cx - bw / 2:.1f}" y="{ya:.1f}" width="{bw:.1f}" '
+                 f'height="{alto:.1f}" fill="{relleno}" rx="1" />')
         signo = "" if tipo == "base" else ("+" if valor >= 0 else "−")
-        # el mismo número en pesos: las bases al cambio de su corte, y el
-        # incremento por reserva como la resta de los dos cierres convertidos
-        if tipo == "base":
-            mxn = valor * (fx_a if i == len(geo) - 1 else fx_p)
-        else:
-            a = hist.diferencia(actual, etq_id.get(etq)) or 0.0
-            b = hist.diferencia(previo, etq_id.get(etq)) or 0.0
-            mxn = (a * fx_a - b * fx_p) / 1e6
-        for clase, num in (("v-usd", valor), ("v-mxn", mxn)):
-            partes.append(f'<text class="{clase}" x="{cx:.1f}" y="{ya - 9:.1f}" '
-                          f'text-anchor="middle" fill="{PLUM if tipo == "base" else TEAL}" '
-                          f'font-family="Consolas,monospace" font-size="13" '
-                          f'font-weight="500">{signo}{abs(num):,.2f}</text>')
+        for clase, num in (("v-usd", valor), ("v-mxn", valor_mxn)):
+            o.append(f'<text class="{clase}" x="{cx:.1f}" y="{ya - 9:.1f}" '
+                     f'text-anchor="middle" fill="{PLUM if tipo == "base" else TEAL}" '
+                     f'font-family="Consolas,monospace" '
+                     f'font-size="{12 if n > 5 else 13}" font-weight="500">'
+                     f'{signo}{abs(num):,.2f}</text>')
 
-        # etiqueta al pie, partida en renglones de ~18 caracteres
-        renglones, actualr = [], ""
+        # la etiqueta al pie, partida en renglones cortos
+        limite = 13 if n > 5 else 18
+        renglones, actual_r = [], ""
         for palabra in etq.split(" "):
-            if len((actualr + " " + palabra).strip()) > 18:
-                renglones.append(actualr.strip())
-                actualr = palabra
+            if len((actual_r + " " + palabra).strip()) > limite:
+                renglones.append(actual_r.strip())
+                actual_r = palabra
             else:
-                actualr += " " + palabra
-        renglones.append(actualr.strip())
-        tspans = "".join(
-            f'<tspan x="{cx:.1f}" dy="{0 if k == 0 else 13}">{esc(t)}</tspan>'
-            for k, t in enumerate(renglones))
-        partes.append(f'<text y="{H - B + 22}" text-anchor="middle" fill="{INK}" '
-                      f'font-family="Segoe UI,sans-serif" font-size="11.5">{tspans}</text>')
-        partes.append(f'<text x="{cx:.1f}" y="{H - B + 22 + len(renglones) * 13}" '
-                      f'text-anchor="middle" fill="{INK_3}" font-family="Segoe UI,sans-serif" '
-                      f'font-size="10.5">{esc(sub)}</text>')
+                actual_r += " " + palabra
+        renglones.append(actual_r.strip())
+        tspans = "".join(f'<tspan x="{cx:.1f}" dy="{0 if k == 0 else 12}">{esc(t)}</tspan>'
+                         for k, t in enumerate(renglones))
+        o.append(f'<text y="{H - B + 20}" text-anchor="middle" fill="{INK}" '
+                 f'font-family="Segoe UI,sans-serif" '
+                 f'font-size="{10.5 if n > 5 else 11.5}" '
+                 f'font-weight="{600 if tipo == "base" else 400}">{tspans}</text>')
+        o.append(f'<text x="{cx:.1f}" y="{H - B + 20 + len(renglones) * 12}" '
+                 f'text-anchor="middle" fill="{INK_3}" font-family="Segoe UI,sans-serif" '
+                 f'font-size="{9.5 if n > 5 else 10.5}">{esc(sub)}</text>')
 
-        if i < len(geo) - 1:
+        if i < n - 1:
             yfin = y(y1)
-            partes.append(f'<line x1="{cx + bw / 2:.1f}" y1="{yfin:.1f}" '
-                          f'x2="{L + hueco * (i + 1) + hueco / 2 - bw / 2:.1f}" y2="{yfin:.1f}" '
-                          f'stroke="#9FB6C2" stroke-width="1" stroke-dasharray="4 3" />')
+            o.append(f'<line x1="{cx + bw / 2:.1f}" y1="{yfin:.1f}" '
+                     f'x2="{L + hueco * (i + 1) + hueco / 2 - bw / 2:.1f}" y2="{yfin:.1f}" '
+                     f'stroke="#9FB6C2" stroke-width="1" stroke-dasharray="4 3" />')
 
-    for clase, unidad in (("v-usd", "MM USD"), ("v-mxn", "MM MXN")):
-        partes.append(f'<text class="{clase}" x="{L - 8}" y="{T - 18}" fill="{INK_3}" '
-                      f'font-family="Consolas,monospace" font-size="11">'
-                      f'Diferencia acumulada ({unidad})</text>')
-    partes.append("</svg>")
-    return "\n".join(partes)
+    o.append("</svg>")
+    return "\n".join(o)
 
 
 def construir_html(hist: Historico, periodos: "Sequence[str] | None" = None,
                    fx: float = FX_DEFAULT, nota: str = NOTA_RELEVANTE,
-                   grafico: str = "auto") -> str:
+                   grafico: str = "cascada") -> str:
     """Arma la vista completa en un solo archivo HTML, sin dependencias externas.
 
     Las cifras van en las dos monedas y el interruptor de arriba decide cuál se
@@ -1443,12 +1449,11 @@ def construir_html(hist: Historico, periodos: "Sequence[str] | None" = None,
     usan los cortes que no traigan el suyo.
 
     `grafico` decide qué va en el panel de abajo:
-      "auto"      el puente mientras quepa (hasta tres cortes, como la vista de
-                  siempre) y la evolución en cuanto haya más, para que el gráfico
-                  nunca deje fuera un corte que el usuario puso en la tabla;
-      "puente"    el de la imagen original, que abre por reserva el movimiento
-                  entre los DOS últimos cortes;
-      "evolucion" una columna por cada corte elegido.
+      "cascada"   (por omisión) la cascada encadenada: una barra por cada corte
+                  elegido y, entre cada dos, el movimiento abierto por reserva.
+                  Con dos cortes es el puente de siempre; con cuatro son cuatro
+                  cascadas unidas;
+      "evolucion" una columna por corte, cuando se quiere leer sólo el nivel.
     """
     ps = list(periodos) if periodos else hist.periodos()[-PERIODOS_EN_VISTA:]
     if not ps:
@@ -1592,33 +1597,37 @@ def construir_html(hist: Historico, periodos: "Sequence[str] | None" = None,
     # el gráfico del panel. El puente sólo abarca los dos últimos cortes: si la
     # vista lleva más, hay que decirlo o parece que el gráfico no hizo caso.
     completos = [p for p in ps if hist.completo(p)]
-    if grafico == "auto":
-        # con más de tres, el puente dejaría cortes fuera del dibujo
-        grafico = "evolucion" if len(completos) > 3 else "puente"
+    titulo_grafico = "Evolución de la diferencia entre metodologías"
+    series_g = [c for c in CONCEPTOS
+                if any(abs(hist.diferencia(p, c.id) or 0) >= 5000 for p in completos)]
     if grafico == "evolucion" and len(completos) > 1:
-        titulo_grafico = "Evolución de la diferencia entre metodologías"
         pie_grafico = (f"{len(completos)} corte(s): "
                        + ", ".join(etiqueta_corta(p) for p in completos))
-        series_ev = [c for c in CONCEPTOS
-                     if any(abs(hist.diferencia(p, c.id) or 0) >= 5000 for p in completos)]
-        leyenda_ev = "".join(
+        leyenda_g = "".join(
             f'<span class="chip"><i style="background:{SERIE_COLOR.get(c.id, TEAL)}"></i>'
-            f'{esc(c.label.replace("Reserva de ", ""))}</span>' for c in series_ev)
-        cuerpo_grafico = (f'<div class="legend">{leyenda_ev}</div>'
+            f'{esc(c.label.replace("Reserva de ", ""))}</span>' for c in series_g)
+        cuerpo_grafico = (f'<div class="legend">{leyenda_g}</div>'
                           + _svg_evolucion(hist, completos, fx_a))
     else:
-        titulo_grafico = "Evolución de la diferencia entre metodologías"
-        if previo:
-            titulo_grafico += f" · {etiqueta_corta(previo)} → {etiqueta_corta(actual)}"
-            pie_grafico = "puente por reserva entre esos dos cortes"
-            if len(completos) > 2:
-                fuera = [p for p in completos if p not in (previo, actual)]
-                pie_grafico += (" · fuera del puente: "
-                                + ", ".join(etiqueta_corta(p) for p in fuera)
-                                + " (para verlos todos, elige «Evolución» como gráfico)")
+        if len(completos) > 2:
+            titulo_grafico += (f" · {etiqueta_corta(completos[0])} → "
+                               f"{etiqueta_corta(completos[-1])}")
+            pie_grafico = (f"{len(completos)} cortes encadenados; entre cada dos, el "
+                           "movimiento abierto por reserva")
+        elif len(completos) == 2:
+            titulo_grafico += (f" · {etiqueta_corta(completos[0])} → "
+                               f"{etiqueta_corta(completos[1])}")
+            pie_grafico = "movimiento abierto por reserva entre los dos cortes"
         else:
             pie_grafico = "hace falta un corte anterior"
-        cuerpo_grafico = _svg_cascada(hist, actual, previo, fx_a, tc.get(previo, fx_a))
+        leyenda_g = ('<span class="chip"><i style="background:#8E2A66"></i>'
+                     'Diferencia total del corte</span>'
+                     f'<span class="chip"><i style="background:{TEAL_2}"></i>'
+                     'Incremento</span>'
+                     f'<span class="chip"><i style="background:{NEG}"></i>'
+                     'Disminución</span>')
+        cuerpo_grafico = (f'<div class="legend">{leyenda_g}</div>'
+                          + _svg_cascada(hist, completos, tc))
 
     # el tipo de cambio que se enseña arriba: uno solo si todos coinciden
     distintos = len({round(v, 6) for v in tc.values()}) > 1
@@ -2013,7 +2022,7 @@ def escribir_evolucion(hist: Historico, destino: "str | Path | None" = None,
 def escribir_vista(hist: Historico, destino: "str | Path | None" = None,
                    periodos: "Sequence[str] | None" = None, fx: float = FX_DEFAULT,
                    nota: str = NOTA_RELEVANTE, abrir: bool = True,
-                   grafico: str = "auto") -> Path:
+                   grafico: str = "cascada") -> Path:
     """Escribe el HTML junto al notebook y lo abre en el navegador."""
     ps = list(periodos) if periodos else hist.periodos()[-PERIODOS_EN_VISTA:]
     if not ps:
@@ -2234,11 +2243,8 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
     tk.Entry(ctl, textvariable=fx_var, width=10, font=(MONO, 9)).pack(side="left", padx=(8, 16))
     tk.Label(ctl, text="Gráfico de la vista", bg=GROUND, fg=INK_3,
              font=(UI, 8, "bold")).pack(side="left")
-    # el puente sólo abarca los dos últimos cortes; con más en la vista, la
-    # evolución es la que los enseña todos
-    GRAFICOS = {"Automático": "auto",
-                "Puente por reserva (dos últimos cortes)": "puente",
-                "Evolución (todos los cortes elegidos)": "evolucion"}
+    GRAFICOS = {"Cascada encadenada (por reserva)": "cascada",
+                "Columnas por corte": "evolucion"}
     graf_var = tk.StringVar(value=list(GRAFICOS)[0])
     ttk.Combobox(ctl, textvariable=graf_var, state="readonly", width=32,
                  values=list(GRAFICOS)).pack(side="left", padx=(8, 16))
@@ -2589,22 +2595,16 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
         apunta(f"· histórico local en {hist.ruta} ({len(hist.periodos())} corte(s))")
         try:
             ruta_html = escribir_vista(h, periodos=ps, fx=fx, nota=estado["nota"],
-                                       grafico=GRAFICOS.get(graf_var.get(), "auto"))
+                                       grafico=GRAFICOS.get(graf_var.get(), "cascada"))
         except Exception as err:
             apunta(f"! no se pudo escribir la vista: {err}", "err")
             return
         apunta(f"· vista de {', '.join(etiqueta_corta(p) for p in ps)} escrita en "
                f"{ruta_html}", "ok")
         comp = [p for p in ps if h.completo(p)]
-        if GRAFICOS.get(graf_var.get()) == "auto" and len(comp) > 3:
-            apunta(f"  {len(comp)} cortes en la vista: el gráfico de abajo pasa solo "
-                   "a la evolución, para que salgan todos.", "ok")
-        elif GRAFICOS.get(graf_var.get()) == "puente" and len(comp) > 2:
-            fuera = ", ".join(etiqueta_corta(p) for p in comp[:-2])
-            apunta(f"  el puente sólo abarca {etiqueta_corta(comp[-2])} → "
-                   f"{etiqueta_corta(comp[-1])}; {fuera} sale(n) en la tabla pero no en "
-                   "el gráfico. Cambia «Gráfico de la vista» a «Evolución» para verlos "
-                   "todos.", "warn")
+        if GRAFICOS.get(graf_var.get()) == "cascada" and len(comp) > 1:
+            apunta(f"  cascada de {len(comp)} corte(s) encadenado(s): "
+                   + " → ".join(etiqueta_corta(p) for p in comp))
         for p in ps:
             if h.datos.get(p, {}).get("aviso"):
                 apunta(f"  revisar {etiqueta_periodo(p)}: {h.datos[p]['aviso']}", "warn")

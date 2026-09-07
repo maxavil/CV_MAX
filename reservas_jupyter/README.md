@@ -183,12 +183,15 @@ criterio, para que ninguna parte de la hoja contradiga a otra.
 
 ### El gráfico de la vista
 
-El puente de la imagen original abre por reserva el movimiento entre los **dos
-últimos** cortes. Con tres columnas eso está bien; con más, dejaría fuera del
-dibujo meses que sí salen en la tabla. Por eso el gráfico se elige solo: puente
-hasta tres cortes, evolución en cuanto haya más, de modo que nunca falte abajo un
-corte que el usuario puso arriba. El desplegable «Gráfico de la vista» permite
-forzar uno u otro, y cuando el puente deja cortes fuera lo dice en el pie.
+La cascada **encadena todos los cortes elegidos**: una barra por cada corte con su
+diferencia total y, entre cada dos, el movimiento abierto por reserva. Con dos
+cortes es el puente de siempre; con cuatro son cuatro cascadas unidas, y se ve
+caminar la diferencia corte a corte. Agregar o quitar cortes arriba cambia el
+dibujo: el gráfico nunca deja fuera un mes que está en la tabla.
+
+El lienzo crece con los cortes para que las etiquetas no se encimen, y lo que baja
+va en rojo. El desplegable «Gráfico de la vista» ofrece además columnas por corte,
+para cuando sólo interesa el nivel y no el movimiento.
 
 ### Evolución de la diferencia
 
@@ -201,7 +204,7 @@ el color nunca sea la única pista.
 
 ## Comprobación
 
-`verificar.py` ejecuta el bloque sin abrir ventana y contrasta 284 cifras contra
+`verificar.py` ejecuta el bloque sin abrir ventana y contrasta 316 cifras contra
 los valores de control del cierre de junio 2026: los seis cortes concepto por
 concepto, la vista en millones, los indicadores, la estructura del HTML, el ida y
 vuelta completo por la base de datos (contra un SQLite, con el mismo código que
@@ -212,8 +215,10 @@ rechazo de nombres de base inválidos. Arma además la tablita de los actuarios 
 como la mandan —título del corte, las tres reservas y su Total— en las tres formas
 en que puede venir el importe, y comprueba que el cruce trae la columna estatutaria
 y que el desajuste contra la balanza se avisa, cargando en los dos órdenes.
-Comprueba también que el gráfico de la vista cambia solo según cuántos cortes se
-eligieron, y que los globos del cursor no salen abiertos al incrustarlo. Y vuelve
+Comprueba también que la cascada encadena todos los cortes elegidos —cuenta las
+barras, contrasta el saldo de cada una, exige que cada corte salga nombrado al pie
+y que el lienzo crezca— y que los globos del cursor no salen abiertos al incrustar
+el gráfico de columnas. Y vuelve
 a cargar la balanza para confirmar que el histórico conserva los cortes anteriores.
 
 ```

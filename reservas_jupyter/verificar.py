@@ -364,52 +364,70 @@ def main(argv):
     if repo.crear_base("Reservas_QES") is not False:
         fallos.append("en SQLite crear_base debería no hacer nada y devolver False")
 
-    # ---- 7 ter. el gráfico hace caso a los cortes elegidos ---------------
-    # El puente sólo abarca los dos últimos cortes. Si la vista lleva más, el
-    # gráfico debe pasar solo a la evolución: si no, el usuario elige cuatro
-    # meses, los ve en la tabla y no los ve abajo.
+    # ---- 7 ter. la cascada encadena todos los cortes elegidos ------------
+    # Con cuatro cortes deben salir cuatro cascadas unidas: si sólo dibujara el
+    # puente de los dos últimos, el usuario elige cuatro meses, los ve en la
+    # tabla y no los ve abajo.
     import re as _r
     def _grafico(ps_, **kw):
         d = construir_html(h, periodos=ps_, **kw)
         svg = d[d.index("<svg"):d.index("</svg>")]
-        meses = _r.findall(r'font-size="11">([A-Z][a-z]{2})</text>', svg)
-        return ("evolucion" if 'class="ev"' in svg else "puente"), meses, d
+        return svg, d
 
     seis = h.periodos()
-    for n, esperado in ((2, "puente"), (3, "puente"), (4, "evolucion"), (6, "evolucion")):
-        tipo, meses, doc = _grafico(seis[-n:])
+    for n in (2, 3, 4, 6):
+        ps_ = seis[-n:]
+        svg, doc = _grafico(ps_)
         pruebas += 1
-        if tipo != esperado:
-            fallos.append(f"con {n} cortes el gráfico debería ser {esperado}, salió {tipo}")
-        if esperado == "evolucion":
-            igual(f"columnas del gráfico con {n} cortes", len(meses), n, 0)
+        if 'class="wf"' not in svg:
+            fallos.append(f"con {n} cortes no salió la cascada")
+        # una barra base por corte, más los movimientos por reserva entre ellos
+        mov = sum(1 for a, b in zip(ps_, ps_[1:]) for c in BLOQUE["CONCEPTOS"]
+                  if abs((h.incremento(b, a, c.id) or 0)) >= 5000)
+        igual(f"barras de la cascada con {n} cortes",
+              svg.count("<rect "), n + mov, 0)
+        # cada corte tiene que aparecer nombrado al pie
+        for per in ps_:
             pruebas += 1
-            if 'class="legend"' not in doc:
-                fallos.append(f"falta la leyenda en el gráfico de evolución ({n} cortes)")
-
-    # los globos no pueden salir abiertos: su CSS viaja dentro del propio svg
-    _t, _m, doc4 = _grafico(seis[-4:])
-    svg4 = doc4[doc4.index("<svg"):doc4.index("</svg>")]
-    for regla in (".ev .tip{opacity:0", ".ev .c0:hover ~ .t0", ".ev .hit{fill:transparent}"):
+            if etiqueta_corta(per) not in svg.replace("</tspan><tspan", "").replace(
+                    "</tspan>", "").replace(">", ">").replace("<tspan", ""):
+                partes = etiqueta_corta(per).split()
+                if not all(x in svg for x in partes):
+                    fallos.append(f"la cascada de {n} cortes no nombra {etiqueta_corta(per)}")
+        # los saldos de las barras base son la diferencia de cada corte
+        for per in ps_:
+            pruebas += 1
+            esperado = f"{(h.diferencia(per) or 0) / 1e6:,.2f}"
+            if f">{esperado}</text>" not in svg:
+                fallos.append(f"la cascada no marca {esperado} para {etiqueta_corta(per)}")
         pruebas += 1
-        if regla not in svg4:
-            fallos.append(f"el svg de evolución no lleva su propio «{regla}»")
-    igual("globos incrustados", svg4.count('class="tip t'), 4, 0)
+        if 'class="legend"' not in doc:
+            fallos.append(f"falta la leyenda de la cascada con {n} cortes")
 
-    # y se puede forzar a mano en los dos sentidos
-    tipo, _m, _d = _grafico(seis[-4:], grafico="puente")
+    # el lienzo crece con los cortes, para que no se encimen las etiquetas
+    svg2, _ = _grafico(seis[-2:])
+    svg6, _ = _grafico(seis)
+    a2 = int(_r.search(r'viewBox="0 0 (\d+)', svg2).group(1))
+    a6 = int(_r.search(r'viewBox="0 0 (\d+)', svg6).group(1))
     pruebas += 1
-    if tipo != "puente":
-        fallos.append("forzar «puente» con 4 cortes no se respetó")
-    tipo, meses, _d = _grafico(seis[-2:], grafico="evolucion")
+    if a6 <= a2:
+        fallos.append(f"el lienzo no crece con los cortes: {a2} con 2, {a6} con 6")
+
+    # el signo: lo que baja va en rojo
+    svg4, _ = _grafico(seis[-4:])
     pruebas += 1
-    if tipo != "evolucion":
-        fallos.append("forzar «evolución» con 2 cortes no se respetó")
-    # el puente, cuando deja cortes fuera, lo dice
-    _t, _m, doc_p = _grafico(seis[-4:], grafico="puente")
+    if "−0.17" not in svg4 or BLOQUE["NEG"] not in svg4:
+        fallos.append("la cascada no marca en rojo el movimiento que baja")
+
+    # y se puede pedir columnas en vez de cascada
+    svg_ev, doc_ev = _grafico(seis[-4:], grafico="evolucion")
     pruebas += 1
-    if "fuera del puente" not in doc_p:
-        fallos.append("el puente no avisa de los cortes que deja fuera")
+    if 'class="ev"' not in svg_ev:
+        fallos.append("pedir «evolucion» no dio el gráfico de columnas")
+    for regla in (".ev .tip{opacity:0", ".ev .c0:hover ~ .t0"):
+        pruebas += 1
+        if regla not in svg_ev:
+            fallos.append(f"el svg de columnas no lleva su propio «{regla}»")
 
     # ---- 8. las dos monedas ---------------------------------------------
     TC = {"2025-12-31": 17.8410, "2026-03-31": 17.6220, "2026-06-30": 17.4986}
