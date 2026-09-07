@@ -163,6 +163,92 @@ def main(argv):
     igual("un corte anterior quedó intacto", h2.datos["2025-12-31"]["cnsf"]["rrc"],
           antes["rrc"], 0.005)
 
+    # ---- 5 bis. la tablita de los actuarios, en las dos convenciones -----
+    # Los importes pueden venir como número de Excel o como texto, y el texto
+    # tanto «$8,331,317.86» como «$8.331.317,86». Leer el segundo como 8.33 no
+    # truena: sólo mete un importe mil veces más chico en el reporte.
+    to_num = BLOQUE["to_num"]
+    NUMEROS = [
+        ("$8.331.317,86", 8331317.86), ("$11.142.522,97", 11142522.97),
+        ("$12.701,88", 12701.88), ("$325.011,19", 325011.19),
+        ("$14.286.192,37 ", 14286192.37), ("8331317,86", 8331317.86),
+        ("$8,331,317.86", 8331317.86), ("8,331,317.86", 8331317.86),
+        ("8331317.86", 8331317.86), ("(1.234,50)", -1234.50),
+        ("(1,234.50)", -1234.50), ("-8.331.317,86", -8331317.86),
+        ("1,234", 1234.0), ("1.234", 1.234), ("12.70", 12.70),
+        ("1.234.567", 1234567.0), ("1,234,567", 1234567.0), ("7461,06", 7461.06),
+    ]
+    for txt, esp in NUMEROS:
+        igual(f"to_num({txt!r})", to_num(txt), esp, 0.005)
+    for basura in ("", "abc", "1.2.3,4,5", "-", "$", "12/05/2026"):
+        pruebas += 1
+        if to_num(basura) is not None:
+            fallos.append(f"to_num aceptó basura: {basura!r} -> {to_num(basura)!r}")
+
+    # la tablita tal como la mandan los actuarios, armada aquí y leída de vuelta
+    from openpyxl import Workbook
+    def _eu(x):
+        return "$" + f"{x:,.2f}".replace(",", "\x00").replace(".", ",").replace("\x00", ".") + " "
+    BLOQUES = {
+        "31 de Julio  de 2025":    [(8331317.86, 11142522.97), (2818658.21, 2818658.21),
+                                    (12701.88, 325011.19)],
+        "30 de Junio de 2026":     [(9084601.70, 12799633.26), (2773742.22, 2773742.22),
+                                    (7461.06, 809405.38)],
+    }
+    NOMS = ["Reserva de Riesgos en Curso", "Reserva de Siniestros Reportados",
+            "Reserva de Siniestros No reportados"]
+    for etiqueta, fmt in (("número", None), ("texto europeo", _eu),
+                          ("texto inglés", lambda x: f"${x:,.2f} ")):
+        wb = Workbook(); ws = wb.active
+        r = 2
+        for titulo, filas in BLOQUES.items():
+            ws.cell(r, 2, titulo)
+            ws.cell(r + 1, 1, "Reserva")
+            ws.cell(r + 1, 2, "QES\nMetodología local")
+            ws.cell(r + 1, 3, "QES\nCNSF\nMetodo Estatutarío")
+            for k, (nom, (loc, cn)) in enumerate(zip(NOMS, filas)):
+                ws.cell(r + 2 + k, 1, nom)
+                ws.cell(r + 2 + k, 2, fmt(loc) if fmt else loc)
+                ws.cell(r + 2 + k, 3, fmt(cn) if fmt else cn)
+            tl, tcn = sum(a for a, _ in filas), sum(b for _, b in filas)
+            ws.cell(r + 5, 1, "Total Reservas")
+            ws.cell(r + 5, 2, fmt(tl) if fmt else tl)
+            ws.cell(r + 5, 3, fmt(tcn) if fmt else tcn)
+            r += 8
+        ruta_act = tmp / f"act_{etiqueta.split()[-1]}.xlsx"
+        wb.save(ruta_act)
+
+        lec = BLOQUE["leer_fuente"](ruta_act)
+        igual(f"actuarios en {etiqueta}: se reconoce",
+              1 if lec.fuente == "actuarios" else 0, 1, 0)
+        igual(f"actuarios en {etiqueta}: cortes", len(lec.cortes), 2, 0)
+        for per, filas in (("2025-07-31", BLOQUES["31 de Julio  de 2025"]),
+                           ("2026-06-30", BLOQUES["30 de Junio de 2026"])):
+            v = lec.periodos.get(per, {"local": {}, "cnsf": {}})
+            igual(f"{etiqueta} · {per} conceptos", len(v["cnsf"]), 3, 0)
+            for cid, (loc, cn) in zip(("rrc", "rsr", "rsnr"), filas):
+                igual(f"{etiqueta} · {per} {cid} local", v["local"].get(cid), loc, 0.005)
+                igual(f"{etiqueta} · {per} {cid} CNSF", v["cnsf"].get(cid), cn, 0.005)
+
+    # la balanza manda para la columna local, y el desajuste se avisa
+    import openpyxl as _op
+    wb = _op.load_workbook(tmp / "act_europeo.xlsx"); ws = wb.active
+    destino = max((c.row for f in ws.iter_rows() for c in f
+                   if isinstance(c.value, str) and "Riesgos en Curso" in c.value))
+    ws.cell(destino, 2).value = "$9.000.000,00 "
+    wb.save(tmp / "act_desajustado.xlsx")
+    for etq, orden in (("actuarios primero", [tmp / "act_desajustado.xlsx", balanza]),
+                       ("balanza primero", [balanza, tmp / "act_desajustado.xlsx"])):
+        hx = Historico(tmp / f"hx_{etq[0]}.json")
+        for f in orden:
+            hx.procesar(f)
+        igual(f"{etq}: la columna local sale de la balanza",
+              hx.datos["2026-06-30"]["local"]["rrc"], 9084601.70, 0.005)
+        pruebas += 1
+        aviso = hx.datos["2026-06-30"].get("aviso", "")
+        if "no coincide" not in aviso or "9,000,000.00" not in aviso:
+            fallos.append(f"{etq}: el check no avisó del desajuste (aviso: {aviso!r})")
+
     # ---- 6. el servidor: subir, catalogar y volver a armar --------------
     Repositorio, leer_fuente = BLOQUE["Repositorio"], BLOQUE["leer_fuente"]
     repo = Repositorio(url=f"sqlite:///{tmp/'audit.db'}")

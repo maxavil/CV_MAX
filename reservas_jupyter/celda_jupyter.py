@@ -97,18 +97,42 @@ def norm(v: Any) -> str:
 
 
 def to_num(v: Any) -> "float | None":
-    """Número de una celda; acepta texto con comas, signo $ y paréntesis."""
+    """Número de una celda; acepta texto con separadores, signo $ y paréntesis.
+
+    Aguanta las dos convenciones, porque los actuarios mandan de las dos:
+    «8,331,317.86» y «8.331.317,86» son el mismo importe. La regla es la de
+    siempre: si aparecen los dos separadores, el ÚLTIMO es el decimal; si uno se
+    repite, ese es el de miles. Importa de verdad: leer «$12.701,88» como 12.70
+    no truena, sólo mete un número mil veces más chico en el reporte.
+    """
     if isinstance(v, bool):
         return None
     if isinstance(v, (int, float)):
         return float(v)
     if not isinstance(v, str):
         return None
-    s = re.sub(r"[\s$]", "", v).replace(",", "")
+
+    s = re.sub(r"[\s$€\u00a0]", "", v)
     neg = bool(re.fullmatch(r"\(.*\)", s))
     if neg:
         s = s[1:-1]
-    if not re.fullmatch(r"-?\d*\.?\d+", s):
+    if s.startswith("-"):
+        neg, s = True, s[1:]
+    if not s or not re.fullmatch(r"[\d.,]+", s):
+        return None
+
+    puntos, comas = s.count("."), s.count(",")
+    if puntos and comas:                       # el último que aparece es el decimal
+        dec = "." if s.rfind(".") > s.rfind(",") else ","
+        s = s.replace("," if dec == "." else ".", "").replace(dec, ".")
+    elif puntos > 1 or comas > 1:              # repetido: es separador de miles
+        s = s.replace("." if puntos > 1 else ",", "")
+    elif comas == 1:
+        # una coma sola: decimal, salvo que sean justo tres dígitos detrás,
+        # que es el caso de siempre de los miles a la inglesa («1,234»)
+        s = s.replace(",", "" if re.fullmatch(r"\d+,\d{3}", s) else ".")
+
+    if not re.fullmatch(r"\d*\.?\d+", s):
         return None
     n = float(s)
     return -n if neg else n

@@ -63,7 +63,15 @@ método estatutario. El periodo sale del serial de fecha de la propia fila (base
 archivo se cargan de una pasada.
 
 Cuidado con «Reserva de Siniestros **No** Reportados»: contiene a «Reportados»
-como subcadena, y por eso el emparejador descarta explícitamente ese caso.
+como subcadena, y por eso el emparejador descarta explícitamente ese caso. La
+fila «Total Reservas» se ignora sola: dice «reservas» pero no nombra ninguno de
+los tres conceptos.
+
+Los importes se leen vengan como vengan: número de Excel, o texto en cualquiera
+de las dos convenciones —`$8,331,317.86` y `$8.331.317,86` son el mismo importe—.
+Si aparecen los dos separadores, el último es el decimal; si uno se repite, ése es
+el de miles. Importa: leer `$12.701,88` como `12.70` no truena, sólo mete un
+importe mil veces más chico en el reporte.
 
 **El cálculo.** Diferencia = método estatutario CNSF − metodología local (el exceso
 de constitución del estatutario, sale positiva). Total = suma de los tres conceptos
@@ -184,15 +192,18 @@ el color nunca sea la única pista.
 
 ## Comprobación
 
-`verificar.py` ejecuta el bloque sin abrir ventana y contrasta 193 cifras contra
+`verificar.py` ejecuta el bloque sin abrir ventana y contrasta 269 cifras contra
 los valores de control del cierre de junio 2026: los seis cortes concepto por
 concepto, la vista en millones, los indicadores, la estructura del HTML, el ida y
 vuelta completo por la base de datos (contra un SQLite, con el mismo código que
 corre en SQL Server), la página de evolución y el interruptor de moneda —celda por
 celda, con el tipo de cambio de cada cierre, y comprobando que el indicador y el
 mensaje clave digan la misma variación—, la vista plana del servidor y el
-rechazo de nombres de base inválidos. Además vuelve a cargar la balanza para
-confirmar que el histórico conserva los cortes anteriores.
+rechazo de nombres de base inválidos. Arma además la tablita de los actuarios tal
+como la mandan —título del corte, las tres reservas y su Total— en las tres formas
+en que puede venir el importe, y comprueba que el cruce trae la columna estatutaria
+y que el desajuste contra la balanza se avisa, cargando en los dos órdenes. Y vuelve
+a cargar la balanza para confirmar que el histórico conserva los cortes anteriores.
 
 ```
 python verificar.py ruta/Balanza_062026.xlsx ruta/ResultadosQES.xlsb
