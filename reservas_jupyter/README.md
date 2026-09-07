@@ -181,6 +181,15 @@ la diferencia total sube USD 0.42 MM (+10.3 %) pero MXN 6.88 MM (+9.5 %). Los
 indicadores, la matriz, la cascada y los mensajes clave usan todos ese mismo
 criterio, para que ninguna parte de la hoja contradiga a otra.
 
+### El gráfico de la vista
+
+El puente de la imagen original abre por reserva el movimiento entre los **dos
+últimos** cortes. Con tres columnas eso está bien; con más, dejaría fuera del
+dibujo meses que sí salen en la tabla. Por eso el gráfico se elige solo: puente
+hasta tres cortes, evolución en cuanto haya más, de modo que nunca falte abajo un
+corte que el usuario puso arriba. El desplegable «Gráfico de la vista» permite
+forzar uno u otro, y cuando el puente deja cortes fuera lo dice en el pie.
+
 ### Evolución de la diferencia
 
 **Ver evolución** escribe una página aparte con la diferencia de todos los cortes en
@@ -192,7 +201,7 @@ el color nunca sea la única pista.
 
 ## Comprobación
 
-`verificar.py` ejecuta el bloque sin abrir ventana y contrasta 269 cifras contra
+`verificar.py` ejecuta el bloque sin abrir ventana y contrasta 284 cifras contra
 los valores de control del cierre de junio 2026: los seis cortes concepto por
 concepto, la vista en millones, los indicadores, la estructura del HTML, el ida y
 vuelta completo por la base de datos (contra un SQLite, con el mismo código que
@@ -202,7 +211,9 @@ mensaje clave digan la misma variación—, la vista plana del servidor y el
 rechazo de nombres de base inválidos. Arma además la tablita de los actuarios tal
 como la mandan —título del corte, las tres reservas y su Total— en las tres formas
 en que puede venir el importe, y comprueba que el cruce trae la columna estatutaria
-y que el desajuste contra la balanza se avisa, cargando en los dos órdenes. Y vuelve
+y que el desajuste contra la balanza se avisa, cargando en los dos órdenes.
+Comprueba también que el gráfico de la vista cambia solo según cuántos cortes se
+eligieron, y que los globos del cursor no salen abiertos al incrustarlo. Y vuelve
 a cargar la balanza para confirmar que el histórico conserva los cortes anteriores.
 
 ```

@@ -364,6 +364,53 @@ def main(argv):
     if repo.crear_base("Reservas_QES") is not False:
         fallos.append("en SQLite crear_base debería no hacer nada y devolver False")
 
+    # ---- 7 ter. el gráfico hace caso a los cortes elegidos ---------------
+    # El puente sólo abarca los dos últimos cortes. Si la vista lleva más, el
+    # gráfico debe pasar solo a la evolución: si no, el usuario elige cuatro
+    # meses, los ve en la tabla y no los ve abajo.
+    import re as _r
+    def _grafico(ps_, **kw):
+        d = construir_html(h, periodos=ps_, **kw)
+        svg = d[d.index("<svg"):d.index("</svg>")]
+        meses = _r.findall(r'font-size="11">([A-Z][a-z]{2})</text>', svg)
+        return ("evolucion" if 'class="ev"' in svg else "puente"), meses, d
+
+    seis = h.periodos()
+    for n, esperado in ((2, "puente"), (3, "puente"), (4, "evolucion"), (6, "evolucion")):
+        tipo, meses, doc = _grafico(seis[-n:])
+        pruebas += 1
+        if tipo != esperado:
+            fallos.append(f"con {n} cortes el gráfico debería ser {esperado}, salió {tipo}")
+        if esperado == "evolucion":
+            igual(f"columnas del gráfico con {n} cortes", len(meses), n, 0)
+            pruebas += 1
+            if 'class="legend"' not in doc:
+                fallos.append(f"falta la leyenda en el gráfico de evolución ({n} cortes)")
+
+    # los globos no pueden salir abiertos: su CSS viaja dentro del propio svg
+    _t, _m, doc4 = _grafico(seis[-4:])
+    svg4 = doc4[doc4.index("<svg"):doc4.index("</svg>")]
+    for regla in (".ev .tip{opacity:0", ".ev .c0:hover ~ .t0", ".ev .hit{fill:transparent}"):
+        pruebas += 1
+        if regla not in svg4:
+            fallos.append(f"el svg de evolución no lleva su propio «{regla}»")
+    igual("globos incrustados", svg4.count('class="tip t'), 4, 0)
+
+    # y se puede forzar a mano en los dos sentidos
+    tipo, _m, _d = _grafico(seis[-4:], grafico="puente")
+    pruebas += 1
+    if tipo != "puente":
+        fallos.append("forzar «puente» con 4 cortes no se respetó")
+    tipo, meses, _d = _grafico(seis[-2:], grafico="evolucion")
+    pruebas += 1
+    if tipo != "evolucion":
+        fallos.append("forzar «evolución» con 2 cortes no se respetó")
+    # el puente, cuando deja cortes fuera, lo dice
+    _t, _m, doc_p = _grafico(seis[-4:], grafico="puente")
+    pruebas += 1
+    if "fuera del puente" not in doc_p:
+        fallos.append("el puente no avisa de los cortes que deja fuera")
+
     # ---- 8. las dos monedas ---------------------------------------------
     TC = {"2025-12-31": 17.8410, "2026-03-31": 17.6220, "2026-06-30": 17.4986}
     for per, v in TC.items():

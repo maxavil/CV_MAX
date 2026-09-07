@@ -1277,6 +1277,10 @@ table.matrix tr.total td.dif,table.matrix tr.total td.delta{color:#fff}
 .panel h3.plum{color:var(--plum-soft)}
 .chart-note{font-size:12px;color:var(--ink-3);font-family:var(--mono)}
 svg.wf{width:100%%;max-width:660px;height:auto;display:block}
+svg.ev{width:100%%;max-width:980px;height:auto;display:block}
+.legend{display:flex;flex-wrap:wrap;gap:16px;margin:2px 0 6px}
+.chip{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;color:var(--ink-2)}
+.chip i{width:11px;height:11px;border-radius:3px;display:inline-block}
 
 ul.keys{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:11px}
 ul.keys li{display:grid;grid-template-columns:16px 1fr;gap:9px;font-size:13.5px;line-height:1.5}
@@ -1430,12 +1434,21 @@ def _svg_cascada(hist: Historico, actual: str, previo: "str | None",
 
 
 def construir_html(hist: Historico, periodos: "Sequence[str] | None" = None,
-                   fx: float = FX_DEFAULT, nota: str = NOTA_RELEVANTE) -> str:
+                   fx: float = FX_DEFAULT, nota: str = NOTA_RELEVANTE,
+                   grafico: str = "auto") -> str:
     """Arma la vista completa en un solo archivo HTML, sin dependencias externas.
 
     Las cifras van en las dos monedas y el interruptor de arriba decide cuál se
     ve. Cada corte se convierte con SU tipo de cambio de cierre: `fx` es el que
     usan los cortes que no traigan el suyo.
+
+    `grafico` decide qué va en el panel de abajo:
+      "auto"      el puente mientras quepa (hasta tres cortes, como la vista de
+                  siempre) y la evolución en cuanto haya más, para que el gráfico
+                  nunca deje fuera un corte que el usuario puso en la tabla;
+      "puente"    el de la imagen original, que abre por reserva el movimiento
+                  entre los DOS últimos cortes;
+      "evolucion" una columna por cada corte elegido.
     """
     ps = list(periodos) if periodos else hist.periodos()[-PERIODOS_EN_VISTA:]
     if not ps:
@@ -1576,6 +1589,37 @@ def construir_html(hist: Historico, periodos: "Sequence[str] | None" = None,
     pie = " · ".join(filter(None, [origen.get("local"), origen.get("cnsf")])) or "—"
     sello = dt.datetime.now().strftime("%d/%m/%Y %H:%M")
 
+    # el gráfico del panel. El puente sólo abarca los dos últimos cortes: si la
+    # vista lleva más, hay que decirlo o parece que el gráfico no hizo caso.
+    completos = [p for p in ps if hist.completo(p)]
+    if grafico == "auto":
+        # con más de tres, el puente dejaría cortes fuera del dibujo
+        grafico = "evolucion" if len(completos) > 3 else "puente"
+    if grafico == "evolucion" and len(completos) > 1:
+        titulo_grafico = "Evolución de la diferencia entre metodologías"
+        pie_grafico = (f"{len(completos)} corte(s): "
+                       + ", ".join(etiqueta_corta(p) for p in completos))
+        series_ev = [c for c in CONCEPTOS
+                     if any(abs(hist.diferencia(p, c.id) or 0) >= 5000 for p in completos)]
+        leyenda_ev = "".join(
+            f'<span class="chip"><i style="background:{SERIE_COLOR.get(c.id, TEAL)}"></i>'
+            f'{esc(c.label.replace("Reserva de ", ""))}</span>' for c in series_ev)
+        cuerpo_grafico = (f'<div class="legend">{leyenda_ev}</div>'
+                          + _svg_evolucion(hist, completos, fx_a))
+    else:
+        titulo_grafico = "Evolución de la diferencia entre metodologías"
+        if previo:
+            titulo_grafico += f" · {etiqueta_corta(previo)} → {etiqueta_corta(actual)}"
+            pie_grafico = "puente por reserva entre esos dos cortes"
+            if len(completos) > 2:
+                fuera = [p for p in completos if p not in (previo, actual)]
+                pie_grafico += (" · fuera del puente: "
+                                + ", ".join(etiqueta_corta(p) for p in fuera)
+                                + " (para verlos todos, elige «Evolución» como gráfico)")
+        else:
+            pie_grafico = "hace falta un corte anterior"
+        cuerpo_grafico = _svg_cascada(hist, actual, previo, fx_a, tc.get(previo, fx_a))
+
     # el tipo de cambio que se enseña arriba: uno solo si todos coinciden
     distintos = len({round(v, 6) for v in tc.values()}) > 1
     if distintos:
@@ -1629,10 +1673,9 @@ def construir_html(hist: Historico, periodos: "Sequence[str] | None" = None,
 
     <div class="band">
       <div class="panel">
-        <h3>Evolución de la diferencia entre metodologías</h3>
-        <p class="chart-note">{dual("Millones de USD", "Millones de MXN")}{
-            " · " + esc(etiqueta_corta(previo)) + " → " + esc(etiqueta_corta(actual)) if previo else ""}</p>
-        {_svg_cascada(hist, actual, previo, fx_a, tc.get(previo, fx_a))}
+        <h3>{esc(titulo_grafico)}</h3>
+        <p class="chart-note">{dual("Millones de USD", "Millones de MXN")} · {esc(pie_grafico)}</p>
+        {cuerpo_grafico}
       </div>
       <div class="panel">
         <h3>Mensajes clave</h3>
@@ -1712,7 +1755,13 @@ def _svg_evolucion(hist: Historico, periodos: "Sequence[str]", fx: float) -> str
     hueco = (W - L - R) / len(ps)
     bw = min(64.0, hueco * 0.62)
 
-    reglas = "\n".join(f".ev .c{i}:hover ~ .t{i}{{opacity:1}}" for i in range(len(ps)))
+    # El estilo viaja DENTRO del svg: si se queda fuera, al incrustar el gráfico
+    # en otra página los globos salen todos abiertos a la vez.
+    reglas = "\n".join([
+        ".ev .hit{fill:transparent}",
+        ".ev .tip{opacity:0;pointer-events:none;transition:opacity .12s}",
+        ".ev .col:hover .seg{filter:brightness(1.12)}",
+    ] + [f".ev .c{i}:hover ~ .t{i}{{opacity:1}}" for i in range(len(ps))])
     o = [f'<svg class="ev" viewBox="0 0 {W} {H}" role="img" '
          f'aria-label="Diferencia entre metodologías por corte, en millones de USD">',
          f'<style>{reglas}</style>']
@@ -1862,14 +1911,6 @@ def construir_html_evolucion(hist: Historico, periodos: "Sequence[str] | None" =
                 else f"Tipo de cambio: {fx_fin:,.4f} MXN / USD")
 
     css_extra = """
-.ev{width:100%;max-width:980px;height:auto;display:block}
-.ev .hit{fill:transparent}
-.ev .tip{opacity:0;pointer-events:none;transition:opacity .12s}
-.ev .col:hover .tip{opacity:1}
-.ev .col:hover .seg{filter:brightness(1.12)}
-.legend{display:flex;flex-wrap:wrap;gap:16px;margin:2px 0 6px}
-.chip{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;color:var(--ink-2)}
-.chip i{width:11px;height:11px;border-radius:3px;display:inline-block}
 table.ev-t{border-collapse:collapse;width:100%;min-width:640px;
            font-variant-numeric:tabular-nums;margin-top:4px}
 table.ev-t th,table.ev-t td{padding:7px 11px;font-size:12.5px;
@@ -1971,13 +2012,14 @@ def escribir_evolucion(hist: Historico, destino: "str | Path | None" = None,
 
 def escribir_vista(hist: Historico, destino: "str | Path | None" = None,
                    periodos: "Sequence[str] | None" = None, fx: float = FX_DEFAULT,
-                   nota: str = NOTA_RELEVANTE, abrir: bool = True) -> Path:
+                   nota: str = NOTA_RELEVANTE, abrir: bool = True,
+                   grafico: str = "auto") -> Path:
     """Escribe el HTML junto al notebook y lo abre en el navegador."""
     ps = list(periodos) if periodos else hist.periodos()[-PERIODOS_EN_VISTA:]
     if not ps:
         raise ValueError("El histórico está vacío: carga al menos un archivo.")
     ruta = Path(destino) if destino else hist.ruta.parent / f"vista_reservas_{ps[-1]}.html"
-    ruta.write_text(construir_html(hist, ps, fx, nota), encoding="utf-8")
+    ruta.write_text(construir_html(hist, ps, fx, nota, grafico), encoding="utf-8")
     if abrir:
         try:
             webbrowser.open_new_tab(ruta.resolve().as_uri())
@@ -2190,6 +2232,16 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
              font=(UI, 8, "bold")).pack(side="left")
     fx_var = tk.StringVar(value=f"{FX_DEFAULT:.4f}")
     tk.Entry(ctl, textvariable=fx_var, width=10, font=(MONO, 9)).pack(side="left", padx=(8, 16))
+    tk.Label(ctl, text="Gráfico de la vista", bg=GROUND, fg=INK_3,
+             font=(UI, 8, "bold")).pack(side="left")
+    # el puente sólo abarca los dos últimos cortes; con más en la vista, la
+    # evolución es la que los enseña todos
+    GRAFICOS = {"Automático": "auto",
+                "Puente por reserva (dos últimos cortes)": "puente",
+                "Evolución (todos los cortes elegidos)": "evolucion"}
+    graf_var = tk.StringVar(value=list(GRAFICOS)[0])
+    ttk.Combobox(ctl, textvariable=graf_var, state="readonly", width=32,
+                 values=list(GRAFICOS)).pack(side="left", padx=(8, 16))
     btn_procesar = ttk.Button(ctl, text="Procesar")
     btn_procesar.pack(side="right")
     btn_evol = ttk.Button(ctl, text="Ver evolución")
@@ -2536,12 +2588,23 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
             return
         apunta(f"· histórico local en {hist.ruta} ({len(hist.periodos())} corte(s))")
         try:
-            ruta_html = escribir_vista(h, periodos=ps, fx=fx, nota=estado["nota"])
+            ruta_html = escribir_vista(h, periodos=ps, fx=fx, nota=estado["nota"],
+                                       grafico=GRAFICOS.get(graf_var.get(), "auto"))
         except Exception as err:
             apunta(f"! no se pudo escribir la vista: {err}", "err")
             return
         apunta(f"· vista de {', '.join(etiqueta_corta(p) for p in ps)} escrita en "
                f"{ruta_html}", "ok")
+        comp = [p for p in ps if h.completo(p)]
+        if GRAFICOS.get(graf_var.get()) == "auto" and len(comp) > 3:
+            apunta(f"  {len(comp)} cortes en la vista: el gráfico de abajo pasa solo "
+                   "a la evolución, para que salgan todos.", "ok")
+        elif GRAFICOS.get(graf_var.get()) == "puente" and len(comp) > 2:
+            fuera = ", ".join(etiqueta_corta(p) for p in comp[:-2])
+            apunta(f"  el puente sólo abarca {etiqueta_corta(comp[-2])} → "
+                   f"{etiqueta_corta(comp[-1])}; {fuera} sale(n) en la tabla pero no en "
+                   "el gráfico. Cambia «Gráfico de la vista» a «Evolución» para verlos "
+                   "todos.", "warn")
         for p in ps:
             if h.datos.get(p, {}).get("aviso"):
                 apunta(f"  revisar {etiqueta_periodo(p)}: {h.datos[p]['aviso']}", "warn")
