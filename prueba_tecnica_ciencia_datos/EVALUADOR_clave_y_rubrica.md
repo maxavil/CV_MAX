@@ -21,6 +21,8 @@
 | **55 – 69** | Intermedio. Programa, pero se le escapan detalles importantes (fuga de informacion, casos borde, metricas). Considerar para perfil junior. |
 | **< 55** | No cumple el perfil. |
 
+> **Sobre el tiempo:** la prueba dura **30 minutos** y el contenido esta calibrado para exigir priorizacion. Es normal que un buen candidato no termine todo. Pondera el **criterio y el enfoque** por encima de la cobertura: codigo parcial pero bien encaminado vale mas que codigo completo sin manejo de casos borde.
+
 > **Senal de alerta independiente del puntaje:** que en la Pregunta 2 no detecte la fuga de informacion, o que en la Parte C ignore por completo los casos borde (divisiones entre cero, registros invalidos). Es lo que mas cuesta en produccion.
 
 ---

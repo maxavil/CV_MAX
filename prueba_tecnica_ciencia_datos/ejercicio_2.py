@@ -1,6 +1,6 @@
 """
 EJERCICIO 2 - Limpieza y analisis de un archivo de siniestros
-(25 puntos | tiempo sugerido: 20 min)
+(25 puntos | tiempo sugerido: 10 min)
 =============================================================================
 
 Contexto de negocio

@@ -1,5 +1,5 @@
 """
-EJERCICIO 1 - Siniestralidad por estado  (25 puntos | tiempo sugerido: 15 min)
+EJERCICIO 1 - Siniestralidad por estado  (25 puntos | tiempo sugerido: 7 min)
 =============================================================================
 
 Contexto de negocio
