@@ -1185,6 +1185,30 @@ class Repositorio:
         with eng.begin() as conn:
             return conn.execute(delete(master).where(master.c.periodo == periodo)).rowcount > 0
 
+    def borrar_carga(self, carga_id: int) -> str:
+        """Borra una carga del servidor. Se niega si es la master de algún corte.
+
+        Es para deshacer una subida equivocada. Lo que está sirviendo de master
+        no se puede borrar de pasada: primero hay que quitarlo del master o
+        apuntar ese corte a otra carga, y así queda a la vista lo que se hizo.
+        """
+        from sqlalchemy import delete, or_, select
+        eng = self._asegura()
+        _, cargas, detalle, master = self.tablas()
+        with eng.begin() as conn:
+            usada = [r[0] for r in conn.execute(
+                select(master.c.periodo).where(
+                    or_(master.c.carga_local == carga_id,
+                        master.c.carga_cnsf == carga_id)))]
+            if usada:
+                raise ValueError(
+                    f"la carga #{carga_id} es la master de "
+                    + ", ".join(etiqueta_corta(p) for p in usada)
+                    + ". Cámbiala o quítala del master antes de borrarla.")
+            n = conn.execute(delete(detalle).where(detalle.c.carga_id == carga_id)).rowcount
+            conn.execute(delete(cargas).where(cargas.c.carga_id == carga_id))
+        return f"carga #{carga_id} borrada ({n} renglón(es) de detalle)"
+
     def maestros(self) -> "list[dict[str, Any]]":
         """Los cortes master, del más viejo al más nuevo."""
         from sqlalchemy import select
@@ -2565,10 +2589,8 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
              font=(UI, 8, "bold")).pack(side="left")
     etq_var = tk.StringVar(value=f"Cierre {dt.date.today():%b %Y}".capitalize())
     tk.Entry(fila2, textvariable=etq_var, width=30, font=(UI, 9)).pack(side="left", padx=(6, 14))
-    btn_master = ttk.Button(fila2, text="Marcar como master", state="disabled")
-    btn_master.pack(side="left")
-    lbl_master = tk.Label(fila2, text="", bg=PAPER, fg=INK_3, font=(UI, 8))
-    lbl_master.pack(side="left", padx=(10, 0))
+    tk.Label(fila2, text="(queda guardada con la carga y se propone al marcar master)",
+             bg=PAPER, fg=INK_3, font=(UI, 8)).pack(side="left")
 
     lbl_srv = tk.Label(srv, text="Sin conectar · el histórico vive en el JSON local.",
                        bg=PAPER, fg=INK_3, font=(UI, 8), anchor="w",
@@ -2581,7 +2603,38 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
              bg=PAPER, fg=INK_3, font=(UI, 8), anchor="w",
              wraplength=ancho_texto, justify="left").pack(fill="x", padx=14, pady=(0, 12))
 
-    # -------------------------------------------------- 3. las tres de la vista
+    # ------------------------------------------------ 3. las versiones master
+    mst = tarjeta("VERSIONES MASTER  ·  lo que ya está verificado")
+    tk.Label(mst, text="Sólo estos cortes viajan dentro del HTML: son los que el lector "
+                       "puede meter y sacar de la vista. De cada corte queda anotado de "
+                       "qué carga sale cada columna.",
+             bg=PAPER, fg=INK_3, font=(UI, 8), anchor="w",
+             wraplength=ancho_texto, justify="left").pack(fill="x", padx=14, pady=(0, 6))
+
+    cols = ("corte", "etiqueta", "local", "cnsf", "usuario", "fecha")
+    tabla_m = ttk.Treeview(mst, columns=cols, show="headings", height=6, selectmode="browse")
+    for c, txt, ancho_c in (("corte", "Corte", 130), ("etiqueta", "Etiqueta", 190),
+                            ("local", "Metodología local", 150),
+                            ("cnsf", "Método Estatutario", 150),
+                            ("usuario", "Marcó", 90), ("fecha", "Cuándo", 105)):
+        tabla_m.heading(c, text=txt)
+        tabla_m.column(c, width=ancho_c, anchor="w", stretch=(c == "etiqueta"))
+    tabla_m.pack(fill="x", padx=14, pady=(0, 6))
+
+    acc = tk.Frame(mst, bg=PAPER)
+    acc.pack(fill="x", padx=14, pady=(0, 12))
+    btn_master = ttk.Button(acc, text="Marcar los de la vista", state="disabled")
+    btn_master.pack(side="left")
+    btn_cambiar = ttk.Button(acc, text="Cambiar…", state="disabled")
+    btn_cambiar.pack(side="left", padx=(6, 0))
+    btn_quitar = ttk.Button(acc, text="Quitar del master", state="disabled")
+    btn_quitar.pack(side="left", padx=(6, 0))
+    btn_borrar = ttk.Button(acc, text="Borrar carga del servidor…", state="disabled")
+    btn_borrar.pack(side="left", padx=(18, 0))
+    lbl_master = tk.Label(acc, text="", bg=PAPER, fg=INK_3, font=(UI, 8))
+    lbl_master.pack(side="left", padx=(12, 0))
+
+    # -------------------------------------------------- 4. las tres de la vista
     sel = tarjeta("TABLAS PARA LA VISTA")
     tk.Label(sel, text="Elige qué tabla va en cada columna. Con el servidor conectado "
                        "aparece cada copia subida (mes · archivo · usuario · #carga); "
@@ -2709,7 +2762,6 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
         btn_procesar.state(["!disabled"] if listo else ["disabled"])
         btn_evol.state(["!disabled"] if listo else ["disabled"])
         btn_esquema.state(["!disabled"] if estado["conectado"] else ["disabled"])
-        btn_master.state(["!disabled"] if estado["conectado"] else ["disabled"])
         btn_subir.state(["!disabled"] if (estado["conectado"] and hay) else ["disabled"])
 
     def carga_rutas(rutas: "Iterable[str]") -> None:
@@ -2826,8 +2878,51 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
                 apunta(f"! {lec.archivo}: no se pudo subir · {err}", "err")
         refresca_snapshots()
 
+    def _texto_carga(cid: "int | None") -> str:
+        if not cid:
+            return "—"
+        s_ = next((x for x in estado["snapshots"] if x["carga_id"] == cid), None)
+        if not s_:
+            return f"#{cid}"
+        return f"#{cid} {s_['archivo']}"
+
+    def refresca_master() -> None:
+        """Vuelve a leer los master del servidor y repinta la lista."""
+        for fila in tabla_m.get_children():
+            tabla_m.delete(fila)
+        if not estado["conectado"]:
+            estado["master"] = []
+            lbl_master.configure(text="sin conexión")
+            for b in (btn_master, btn_cambiar, btn_quitar, btn_borrar):
+                b.state(["disabled"])
+            return
+        try:
+            estado["master"] = repo.maestros()
+        except Exception as err:
+            estado["master"] = []
+            apunta(f"! no se pudo leer el master: {err}", "err")
+        for m in estado["master"]:
+            tabla_m.insert("", "end", iid=m["periodo"], values=(
+                etiqueta_corta(m["periodo"]), m.get("etiqueta") or "—",
+                _texto_carga(m.get("carga_local")), _texto_carga(m.get("carga_cnsf")),
+                m.get("usuario") or "—",
+                m["fecha"].strftime("%d/%m %H:%M") if m.get("fecha") else "—"))
+        n = len(estado["master"])
+        lbl_master.configure(text=f"{n} corte(s) master" if n
+                             else "todavía no hay cortes master")
+        btn_master.state(["!disabled"])
+        btn_borrar.state(["!disabled"])
+        sel_master()
+
+    def sel_master(_e=None) -> None:
+        hay = bool(tabla_m.selection())
+        for b in (btn_cambiar, btn_quitar):
+            b.state(["!disabled"] if hay else ["disabled"])
+
+    tabla_m.bind("<<TreeviewSelect>>", sel_master)
+
     def marcar_master() -> None:
-        """Fija como master los cortes que están ahora en la vista."""
+        """Marca como master los cortes que están ahora en la vista."""
         pares = seleccion() + [(p, None) for p, v in extra_vars.items() if v.get()]
         if not pares:
             apunta("! elige primero los cortes de la vista.", "err")
@@ -2838,30 +2933,157 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
                 loc, cn = repo.master_sugerida(per)
                 repo.marcar_master(per, carga or loc, cn, etiqueta=etq)
                 apunta(f"· {etiqueta_corta(per)} queda como master "
-                       f"(local #{carga or loc}, cnsf #{cn})"
+                       f"(local {_texto_carga(carga or loc)}, "
+                       f"estatutario {_texto_carga(cn)})"
                        + (f" · «{etq}»" if etq else ""), "ok")
             except Exception as err:
                 apunta(f"! no se pudo marcar {etiqueta_corta(per)}: {err}", "err")
         refresca_master()
 
-    def refresca_master() -> None:
-        if not estado["conectado"]:
-            lbl_master.configure(text="")
+    def quitar_master() -> None:
+        per = (tabla_m.selection() or [None])[0]
+        if not per:
+            return
+        if not messagebox.askyesno(
+                "Reservas técnicas QES",
+                f"¿Quitar {etiqueta_corta(per)} de las versiones master?\n\n"
+                "Las cargas subidas no se tocan: sólo deja de ser el corte bueno "
+                "y deja de viajar dentro del HTML."):
             return
         try:
-            estado["master"] = repo.maestros()
-        except Exception:
-            estado["master"] = []
-        n = len(estado["master"])
-        lbl_master.configure(
-            text=(f"{n} corte(s) master: "
-                  + ", ".join(etiqueta_corta(m["periodo"]) for m in estado["master"])
-                  if n else "todavía no hay cortes master"))
-        btn_master.state(["!disabled"] if estado["conectado"] else ["disabled"])
+            repo.quitar_master(per)
+            apunta(f"· {etiqueta_corta(per)} sale del master (las cargas siguen ahí)", "warn")
+        except Exception as err:
+            apunta(f"! no se pudo quitar: {err}", "err")
+        refresca_master()
+
+    def cambiar_master() -> None:
+        """Elegir a mano de qué carga sale cada columna de un corte master."""
+        per = (tabla_m.selection() or [None])[0]
+        if not per:
+            return
+        actual = next((m for m in estado["master"] if m["periodo"] == per), {})
+        opciones_p = [s_ for s_ in estado["snapshots"] if s_["periodo"] == per]
+        if not opciones_p:
+            apunta(f"! no hay cargas de {etiqueta_corta(per)} en el servidor.", "err")
+            return
+
+        win = tk.Toplevel(root)
+        win.title(f"Master de {etiqueta_corta(per)}")
+        win.configure(bg=PAPER)
+        win.transient(root)
+        win.grab_set()
+        tk.Label(win, text=f"Versión master de {etiqueta_periodo(per)}", bg=PAPER, fg=PLUM,
+                 font=(UI, 11, "bold")).grid(row=0, column=0, columnspan=2,
+                                             sticky="w", padx=16, pady=(14, 2))
+        tk.Label(win, text="De qué carga sale cada columna. Las demás copias se conservan.",
+                 bg=PAPER, fg=INK_3, font=(UI, 8), wraplength=520,
+                 justify="left").grid(row=1, column=0, columnspan=2, sticky="w",
+                                      padx=16, pady=(0, 10))
+
+        def etq_op(s_):
+            return (f"#{s_['carga_id']}  ·  {s_['fuente']}  ·  {s_['archivo']}"
+                    f"  ·  {s_['usuario']}"
+                    + (f"  ·  {s_['etiqueta']}" if s_.get("etiqueta") else ""))
+
+        mapa = {etq_op(s_): s_["carga_id"] for s_ in opciones_p}
+        inv = {v: k for k, v in mapa.items()}
+        filas = []
+        for i, (txt, clave, permite_vacio) in enumerate(
+                (("Metodología local", "carga_local", False),
+                 ("Método Estatutario", "carga_cnsf", True))):
+            tk.Label(win, text=txt, bg=PAPER, fg=TEAL, font=(UI, 9, "bold"),
+                     width=18, anchor="w").grid(row=2 + i, column=0, sticky="w",
+                                                padx=(16, 6), pady=3)
+            cb = ttk.Combobox(win, state="readonly", width=58,
+                              values=([""] if permite_vacio else []) + list(mapa))
+            cb.set(inv.get(actual.get(clave), ""))
+            cb.grid(row=2 + i, column=1, sticky="ew", padx=(0, 16), pady=3)
+            filas.append((clave, cb, permite_vacio))
+        tk.Label(win, text="Etiqueta", bg=PAPER, fg=TEAL, font=(UI, 9, "bold"),
+                 width=18, anchor="w").grid(row=4, column=0, sticky="w", padx=(16, 6), pady=3)
+        etq_m = tk.StringVar(value=actual.get("etiqueta") or etq_var.get().strip())
+        tk.Entry(win, textvariable=etq_m, width=60).grid(row=4, column=1, sticky="ew",
+                                                         padx=(0, 16), pady=3)
+
+        def guardar() -> None:
+            valores = {}
+            for clave, cb, permite_vacio in filas:
+                v = cb.get()
+                if not v and not permite_vacio:
+                    apunta("! la metodología local necesita una carga.", "err")
+                    return
+                valores[clave] = mapa.get(v)
+            try:
+                repo.marcar_master(per, valores["carga_local"], valores["carga_cnsf"],
+                                   etiqueta=etq_m.get().strip() or None)
+                apunta(f"· {etiqueta_corta(per)}: master cambiada a local "
+                       f"{_texto_carga(valores['carga_local'])}, estatutario "
+                       f"{_texto_carga(valores['carga_cnsf'])}", "ok")
+            except Exception as err:
+                apunta(f"! no se pudo cambiar: {err}", "err")
+            win.destroy()
+            refresca_master()
+
+        pie = tk.Frame(win, bg=PAPER)
+        pie.grid(row=5, column=0, columnspan=2, sticky="e", padx=16, pady=(12, 14))
+        ttk.Button(pie, text="Cancelar", command=win.destroy).pack(side="left", padx=(0, 6))
+        ttk.Button(pie, text="Guardar", command=guardar).pack(side="left")
+        win.columnconfigure(1, weight=1)
+
+    def borrar_carga() -> None:
+        """Deshacer una subida equivocada."""
+        if not estado["snapshots"]:
+            apunta("! no hay cargas en el servidor.", "err")
+            return
+        vistas, mapa = [], {}
+        for s_ in estado["snapshots"]:
+            t = (f"#{s_['carga_id']}  ·  {etiqueta_corta(s_['periodo'])}  ·  "
+                 f"{s_['fuente']}  ·  {s_['archivo']}  ·  {s_['usuario']}")
+            if t not in mapa:
+                mapa[t] = s_["carga_id"]
+                vistas.append(t)
+
+        win = tk.Toplevel(root)
+        win.title("Borrar una carga del servidor")
+        win.configure(bg=PAPER)
+        win.transient(root)
+        win.grab_set()
+        tk.Label(win, text="Borrar una carga del servidor", bg=PAPER, fg=NEG,
+                 font=(UI, 11, "bold")).pack(anchor="w", padx=16, pady=(14, 2))
+        tk.Label(win, text="Para deshacer una subida equivocada. Lo que esté sirviendo de "
+                           "master no se puede borrar: cámbialo o quítalo del master "
+                           "primero.", bg=PAPER, fg=INK_3, font=(UI, 8),
+                 wraplength=560, justify="left").pack(anchor="w", padx=16, pady=(0, 10))
+        cb = ttk.Combobox(win, state="readonly", width=70, values=vistas)
+        cb.pack(fill="x", padx=16)
+
+        def hazlo() -> None:
+            cid = mapa.get(cb.get())
+            if not cid:
+                return
+            if not messagebox.askyesno("Reservas técnicas QES",
+                                       f"¿Borrar la carga #{cid} del servidor?\n\n"
+                                       "Esto no se puede deshacer."):
+                return
+            try:
+                apunta("· " + repo.borrar_carga(cid), "warn")
+            except Exception as err:
+                apunta(f"! {err}", "err")
+            win.destroy()
+            refresca_snapshots()
+
+        pie = tk.Frame(win, bg=PAPER)
+        pie.pack(anchor="e", padx=16, pady=(12, 14))
+        ttk.Button(pie, text="Cancelar", command=win.destroy).pack(side="left", padx=(0, 6))
+        ttk.Button(pie, text="Borrar", command=hazlo).pack(side="left")
 
     btn_conectar.configure(command=conectar)
     btn_base.configure(command=crear_base)
     btn_master.configure(command=marcar_master)
+    btn_cambiar.configure(command=cambiar_master)
+    btn_quitar.configure(command=quitar_master)
+    btn_borrar.configure(command=borrar_carga)
     btn_esquema.configure(command=crear_tablas)
     btn_subir.configure(command=subir)
 
@@ -3025,16 +3247,38 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
             return
         apunta(f"· histórico local en {hist.ruta} ({len(hist.periodos())} corte(s))")
         try:
+            # Dentro del HTML sólo van cortes ya verificados: las versiones
+            # master. Sin servidor no hay master que valga, así que va el
+            # histórico local y se dice.
             master = [m["periodo"] for m in estado.get("master", [])]
-            dentro = sorted(set(master or h.periodos()) | set(ps))
+            if master:
+                dentro = [p for p in master if p in h.datos]
+                fuera = [p for p in ps if p not in dentro]
+                if fuera:
+                    apunta("  fuera de la vista por no ser master: "
+                           + ", ".join(etiqueta_corta(p) for p in fuera)
+                           + ". Márcalos en «Versiones master» para poder usarlos.", "warn")
+                    ps = [p for p in ps if p in dentro]
+                    if not ps:
+                        ps = dentro[-PERIODOS_EN_VISTA:]
+                        apunta("  ningún corte elegido era master: se arma con "
+                               + ", ".join(etiqueta_corta(p) for p in ps), "warn")
+            else:
+                dentro = [p for p in h.periodos() if p in h.datos]
+                if estado["conectado"]:
+                    apunta("  no hay cortes master todavía: dentro del HTML van todos "
+                           "los del histórico. Márcalos para dejar sólo los verificados.",
+                           "warn")
             ruta_html = escribir_vista(h, periodos=ps, fx=fx, nota=estado["nota"],
                                        grafico=GRAFICOS.get(graf_var.get(), "cascada"),
-                                       disponibles=[p for p in dentro if p in h.datos])
+                                       disponibles=dentro)
         except Exception as err:
             apunta(f"! no se pudo escribir la vista: {err}", "err")
             return
         apunta(f"· vista de {', '.join(etiqueta_corta(p) for p in ps)} escrita en "
                f"{ruta_html}", "ok")
+        apunta(f"  el lector puede meter y sacar {len(dentro)} corte(s) desde el propio "
+               "HTML: " + ", ".join(etiqueta_corta(p) for p in dentro))
         comp = [p for p in ps if h.completo(p)]
         if GRAFICOS.get(graf_var.get()) == "cascada" and len(comp) > 1:
             apunta(f"  cascada de {len(comp)} corte(s) encadenado(s): "

@@ -422,6 +422,30 @@ def main(argv):
         fallos.append("cambiar la master no cambió de qué carga sale la columna local")
     igual("quitar una master", 1 if repo.quitar_master("2026-03-31") else 0, 1, 0)
     igual("queda una", len(repo.maestros()), 1, 0)
+    igual("quitar una que no existe no truena",
+          0 if repo.quitar_master("2099-01-31") else 1, 1, 0)
+
+    # borrar una carga: se niega si está sirviendo de master
+    pruebas += 1
+    try:
+        repo.borrar_carga(id_bis)          # es la master de junio
+        fallos.append("dejó borrar una carga que es master")
+    except ValueError as err:
+        if "master" not in str(err):
+            fallos.append(f"el aviso de borrado no explica el motivo: {err}")
+    # una que no es master, sí
+    id_suelta = repo.subir(leer_fuente(balanza), usuario="prueba", etiqueta="para borrar")
+    igual("la carga suelta está en el catálogo",
+          len([x for x in repo.snapshots() if x["carga_id"] == id_suelta]), 1, 0)
+    pruebas += 1
+    if "borrada" not in repo.borrar_carga(id_suelta):
+        fallos.append("borrar una carga suelta no lo dijo")
+    igual("y desaparece del catálogo",
+          len([x for x in repo.snapshots() if x["carga_id"] == id_suelta]), 0, 0)
+    igual("sin dejar detalle huérfano",
+          len(repo.importes(id_suelta, "2026-06-30")["local"]), 0, 0)
+    igual("y sin tocar las demás cargas",
+          len({x["carga_id"] for x in repo.snapshots()}), 3, 0)
 
     # ---- 7 quinquies. el HTML se rehace solo -----------------------------
     doc_i = construir_html(h, periodos=ps, disponibles=h.periodos())

@@ -188,9 +188,24 @@ generó.
 ### Versiones master
 
 De un mismo corte puede haber varias copias subidas. La **master** es la que
-vale. Al subir se escribe una etiqueta («Cierre junio 2026 v1») que queda en la
-carga, y el botón **Marcar como master** fija, para cada corte de la vista, qué
-carga da la columna local y cuál la estatutaria:
+vale: la verificada, la que se usó para el cierre.
+
+La ventana trae un panel con todas las master a la vista —corte, etiqueta, de
+qué carga sale cada columna, quién la marcó y cuándo— y cuatro acciones:
+
+| Acción | Qué hace |
+|---|---|
+| **Marcar los de la vista** | Convierte en master los cortes que están en la vista, con la etiqueta escrita arriba |
+| **Cambiar…** | Elige a mano de qué carga sale la metodología local y de cuál la estatutaria, y reetiqueta |
+| **Quitar del master** | Saca ese corte. Las cargas no se tocan: sólo deja de ser el bueno |
+| **Borrar carga del servidor…** | Deshace una subida equivocada. Se niega si esa carga está sirviendo de master |
+
+Sólo los cortes master viajan dentro del HTML, y sólo con ellos se arma la
+vista: si eliges un corte que no es master, se queda fuera y la bitácora lo
+dice. Así, dentro del archivo el lector únicamente puede agregar tablas ya
+verificadas.
+
+La estructura:
 
 ```
 dbo.ReservasQES_Master   periodo · carga_local · carga_cnsf · etiqueta ·
@@ -240,7 +255,7 @@ el color nunca sea la única pista.
 
 ## Comprobación
 
-`verificar.py` ejecuta el bloque sin abrir ventana y contrasta 359 cifras contra
+`verificar.py` ejecuta el bloque sin abrir ventana y contrasta 366 cifras contra
 los valores de control del cierre de junio 2026: los seis cortes concepto por
 concepto, la vista en millones, los indicadores, la estructura del HTML, el ida y
 vuelta completo por la base de datos (contra un SQLite, con el mismo código que
@@ -252,7 +267,9 @@ como la mandan —título del corte, las tres reservas y su Total— en las tres
 en que puede venir el importe, y comprueba que el cruce trae la columna estatutaria
 y que el desajuste contra la balanza se avisa, cargando en los dos órdenes.
 Comprueba también que la cascada encadena todos los cortes elegidos, que las
-versiones master se marcan, se cambian y se quitan sin tocar las cargas, que el
+versiones master se marcan, se cambian y se quitan sin tocar las cargas, que una
+carga que sirve de master no se deja borrar y que borrar una suelta no deja
+detalle huérfano, que el
 HTML lleva dentro los seis cortes con sus textos precalculados, y que no queda
 letra por debajo de 13 px ni en la hoja ni en los gráficos. Y vuelve
 a cargar la balanza para confirmar que el histórico conserva los cortes anteriores.
