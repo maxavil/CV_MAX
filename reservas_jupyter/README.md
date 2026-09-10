@@ -165,6 +165,42 @@ de la carga de actuarios más nueva de ese corte; el pie del HTML dice de qué c
 salió cada una. Sin servidor conectado, los desplegables muestran los cortes del
 histórico local y todo sigue funcionando igual.
 
+### Letra grande
+
+La hoja está pensada para leerse sin esfuerzo: la letra más chica es de 13 px y
+la de la matriz, de 16. Arriba hay un control **Normal · Grande · Muy grande**;
+arranca en Grande. Las etiquetas de la cascada crecieron igual, y por eso el
+lienzo del gráfico creció con ellas.
+
+### Los meses los pone y los quita el lector
+
+El HTML lleva dentro **todos los cortes master**, no sólo los tres que se ven al
+abrir. Arriba de la matriz hay una casilla por mes: al marcarla o desmarcarla la
+hoja se rehace sola —matriz, indicadores, cascada, mensajes clave y diferencias
+por reserva— sin volver a Jupyter y sin conexión. Los textos que dependen de un
+par de cortes vienen escritos desde Python, así que la redacción sigue viviendo
+en un solo lugar.
+
+Con JavaScript apagado la hoja no se puede rehacer, pero no queda en blanco: un
+bloque `<noscript>` trae la matriz y la cascada de los cortes con los que se
+generó.
+
+### Versiones master
+
+De un mismo corte puede haber varias copias subidas. La **master** es la que
+vale. Al subir se escribe una etiqueta («Cierre junio 2026 v1») que queda en la
+carga, y el botón **Marcar como master** fija, para cada corte de la vista, qué
+carga da la columna local y cuál la estatutaria:
+
+```
+dbo.ReservasQES_Master   periodo · carga_local · carga_cnsf · etiqueta ·
+                         usuario · fecha · nota
+```
+
+Cambiar la master de un mes no toca las cargas: la copia anterior sigue ahí y se
+puede volver a ella. Los cortes master son los que viajan dentro del HTML para
+que el lector los meta y los saque.
+
 ### Dólares o pesos, con un botón
 
 Las dos vistas traen arriba un interruptor **Dólares / Pesos**. El HTML guarda
@@ -204,7 +240,7 @@ el color nunca sea la única pista.
 
 ## Comprobación
 
-`verificar.py` ejecuta el bloque sin abrir ventana y contrasta 316 cifras contra
+`verificar.py` ejecuta el bloque sin abrir ventana y contrasta 359 cifras contra
 los valores de control del cierre de junio 2026: los seis cortes concepto por
 concepto, la vista en millones, los indicadores, la estructura del HTML, el ida y
 vuelta completo por la base de datos (contra un SQLite, con el mismo código que
@@ -215,10 +251,10 @@ rechazo de nombres de base inválidos. Arma además la tablita de los actuarios 
 como la mandan —título del corte, las tres reservas y su Total— en las tres formas
 en que puede venir el importe, y comprueba que el cruce trae la columna estatutaria
 y que el desajuste contra la balanza se avisa, cargando en los dos órdenes.
-Comprueba también que la cascada encadena todos los cortes elegidos —cuenta las
-barras, contrasta el saldo de cada una, exige que cada corte salga nombrado al pie
-y que el lienzo crezca— y que los globos del cursor no salen abiertos al incrustar
-el gráfico de columnas. Y vuelve
+Comprueba también que la cascada encadena todos los cortes elegidos, que las
+versiones master se marcan, se cambian y se quitan sin tocar las cargas, que el
+HTML lleva dentro los seis cortes con sus textos precalculados, y que no queda
+letra por debajo de 13 px ni en la hoja ni en los gráficos. Y vuelve
 a cargar la balanza para confirmar que el histórico conserva los cortes anteriores.
 
 ```

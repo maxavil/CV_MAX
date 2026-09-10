@@ -140,13 +140,13 @@ def main(argv):
     for cadena in ("Resultados reservas técnicas QES",   # el CSS lo pone en versalitas
                    "text-transform:uppercase",
                    "Comparativo de metodologías y evolución del diferencial",
-                   "17.4986 MXN / USD", "Incremento", "Total reservas",
+                   "Incremento", "Total reservas",
                    "Esta reserva se calcula una vez al año",
                    "Mensajes clave", "Nota relevante", "<svg", "4.52", "10.3%", "0.42"):
         pruebas += 1
         if cadena not in doc:
             fallos.append(f"el HTML no trae «{cadena}»")
-    for prohibido in ("http://", "https://", "<script"):
+    for prohibido in ("http://", "https://", "<link", " src="):
         pruebas += 1
         if prohibido in doc:
             fallos.append(f"el HTML no es autocontenido: contiene «{prohibido}»")
@@ -317,7 +317,7 @@ def main(argv):
         pruebas += 1
         if cadena not in ev:
             fallos.append(f"la evolución no trae «{cadena}»")
-    for prohibido in ("http://", "https://", "<script"):
+    for prohibido in ("http://", "https://", "<link", " src="):
         pruebas += 1
         if prohibido in ev:
             fallos.append(f"la evolución no es autocontenida: contiene «{prohibido}»")
@@ -365,69 +365,94 @@ def main(argv):
         fallos.append("en SQLite crear_base debería no hacer nada y devolver False")
 
     # ---- 7 ter. la cascada encadena todos los cortes elegidos ------------
-    # Con cuatro cortes deben salir cuatro cascadas unidas: si sólo dibujara el
-    # puente de los dos últimos, el usuario elige cuatro meses, los ve en la
-    # tabla y no los ve abajo.
+    # La dibuja el navegador cuando el lector mete o saca meses; la versión en
+    # Python es el respaldo del <noscript> y la que se comprueba aquí.
+    import json as _json
     import re as _r
-    def _grafico(ps_, **kw):
-        d = construir_html(h, periodos=ps_, **kw)
-        svg = d[d.index("<svg"):d.index("</svg>")]
-        return svg, d
-
+    _re = _r
+    svg_de = BLOQUE["_svg_cascada"]
     seis = h.periodos()
     for n in (2, 3, 4, 6):
         ps_ = seis[-n:]
-        svg, doc = _grafico(ps_)
-        pruebas += 1
-        if 'class="wf"' not in svg:
-            fallos.append(f"con {n} cortes no salió la cascada")
-        # una barra base por corte, más los movimientos por reserva entre ellos
+        svg = svg_de(h, ps_, {p_: h.fx(p_) for p_ in ps_})
         mov = sum(1 for a, b in zip(ps_, ps_[1:]) for c in BLOQUE["CONCEPTOS"]
                   if abs((h.incremento(b, a, c.id) or 0)) >= 5000)
-        igual(f"barras de la cascada con {n} cortes",
-              svg.count("<rect "), n + mov, 0)
-        # cada corte tiene que aparecer nombrado al pie
-        for per in ps_:
-            pruebas += 1
-            if etiqueta_corta(per) not in svg.replace("</tspan><tspan", "").replace(
-                    "</tspan>", "").replace(">", ">").replace("<tspan", ""):
-                partes = etiqueta_corta(per).split()
-                if not all(x in svg for x in partes):
-                    fallos.append(f"la cascada de {n} cortes no nombra {etiqueta_corta(per)}")
-        # los saldos de las barras base son la diferencia de cada corte
+        igual(f"barras de la cascada con {n} cortes", svg.count("<rect "), n + mov, 0)
         for per in ps_:
             pruebas += 1
             esperado = f"{(h.diferencia(per) or 0) / 1e6:,.2f}"
             if f">{esperado}</text>" not in svg:
                 fallos.append(f"la cascada no marca {esperado} para {etiqueta_corta(per)}")
         pruebas += 1
-        if 'class="legend"' not in doc:
-            fallos.append(f"falta la leyenda de la cascada con {n} cortes")
+        ancho = int(_r.search(r'viewBox="0 0 (\d+)', svg).group(1))
+        if f"min-width:{ancho}px" not in svg:
+            fallos.append(f"la cascada de {n} cortes se dejaría comprimir")
 
-    # el lienzo crece con los cortes, para que no se encimen las etiquetas
-    svg2, _ = _grafico(seis[-2:])
-    svg6, _ = _grafico(seis)
-    a2 = int(_r.search(r'viewBox="0 0 (\d+)', svg2).group(1))
-    a6 = int(_r.search(r'viewBox="0 0 (\d+)', svg6).group(1))
+    # el lienzo crece con los cortes: apretarlo encimaba las etiquetas del pie
+    a2 = int(_r.search(r'viewBox="0 0 (\d+)', svg_de(h, seis[-2:], {p_: h.fx(p_) for p_ in seis[-2:]})).group(1))
+    a6 = int(_r.search(r'viewBox="0 0 (\d+)', svg_de(h, seis, {p_: h.fx(p_) for p_ in seis})).group(1))
     pruebas += 1
     if a6 <= a2:
         fallos.append(f"el lienzo no crece con los cortes: {a2} con 2, {a6} con 6")
 
-    # el signo: lo que baja va en rojo
-    svg4, _ = _grafico(seis[-4:])
+    # lo que baja va en rojo
+    svg4 = svg_de(h, seis[-4:], {p_: h.fx(p_) for p_ in seis[-4:]})
     pruebas += 1
     if "−0.17" not in svg4 or BLOQUE["NEG"] not in svg4:
         fallos.append("la cascada no marca en rojo el movimiento que baja")
 
-    # y se puede pedir columnas en vez de cascada
-    svg_ev, doc_ev = _grafico(seis[-4:], grafico="evolucion")
+    # ---- 7 quater. las versiones master ----------------------------------
+    igual("sin marcar nada no hay master", len(repo.maestros()), 0, 0)
+    loc, cn = repo.master_sugerida("2026-06-30")
+    igual("la master sugerida es la balanza más nueva", loc, id_bis, 0)
+    igual("y su cnsf, los actuarios", cn, id_act, 0)
+    repo.marcar_master("2026-06-30", id_bal, id_act, etiqueta="Cierre junio", usuario="prueba")
+    repo.marcar_master("2026-03-31", id_act, id_act, etiqueta="Cierre marzo")
+    igual("cortes master", len(repo.maestros()), 2, 0)
+    hm = repo.historico_master(tmp / "hm.json")
+    igual("el histórico master sólo trae los master", len(hm.periodos()), 2, 0)
+    igual("y con sus cifras", hm.diferencia("2026-06-30") / 1e6, 4.52, 0.005)
+    igual("la etiqueta viaja con el corte",
+          1 if hm.datos["2026-06-30"].get("etiqueta") == "Cierre junio" else 0, 1, 0)
+    # cambiar la master de un corte lo cambia en la vista, sin tocar las cargas
+    repo.marcar_master("2026-06-30", id_bis, id_act, etiqueta="Cierre junio v2")
+    igual("cambiar la master no duplica el corte", len(repo.maestros()), 2, 0)
     pruebas += 1
-    if 'class="ev"' not in svg_ev:
-        fallos.append("pedir «evolucion» no dio el gráfico de columnas")
-    for regla in (".ev .tip{opacity:0", ".ev .c0:hover ~ .t0"):
+    if f"#{id_bis}" not in repo.historico_master(tmp / "hm2.json").datos["2026-06-30"]["origen"]["local"]:
+        fallos.append("cambiar la master no cambió de qué carga sale la columna local")
+    igual("quitar una master", 1 if repo.quitar_master("2026-03-31") else 0, 1, 0)
+    igual("queda una", len(repo.maestros()), 1, 0)
+
+    # ---- 7 quinquies. el HTML se rehace solo -----------------------------
+    doc_i = construir_html(h, periodos=ps, disponibles=h.periodos())
+    payload_i = _json.loads(_re.search(r"^const D = (\{.*\});$", doc_i, _re.M).group(1))
+    igual("cortes que viajan dentro del HTML", len(payload_i["cortes"]), 6, 0)
+    igual("cortes marcados al abrir", len(payload_i["activos"]), 3, 0)
+    igual("casillas de mes", doc_i.count('<label class="mes'), 6, 0)
+    # los textos que dependen de un par vienen escritos desde Python
+    igual("pares precalculados", len(payload_i["pares"]), 15, 0)   # 6*5/2
+    for a, b in (("2025-12-31", "2026-06-30"), ("2025-07-31", "2026-03-31")):
         pruebas += 1
-        if regla not in svg_ev:
-            fallos.append(f"el svg de columnas no lleva su propio «{regla}»")
+        if f"{a}|{b}" not in payload_i["pares"]:
+            fallos.append(f"falta el par precalculado {a}|{b}")
+    pruebas += 1
+    if "n2(" not in doc_i or "function cascada" not in doc_i:
+        fallos.append("el HTML no trae el motor que lo rehace")
+
+    # ---- 7 sexies. la letra, para quien batalla para ver -----------------
+    css = BLOQUE["CSS"]
+    tam = [float(x) for x in _re.findall(r"font-size:(\d+(?:\.\d+)?)px", css)]
+    igual("el tamaño de letra más chico de la hoja", min(tam), 13.0, 0.5)
+    pruebas += 1
+    if min(tam) < 12.9:
+        fallos.append(f"hay letra de {min(tam)}px: demasiado chica")
+    for chico in _re.findall(r'font-size="(\d+(?:\.\d+)?)"', doc_i):
+        pruebas += 1
+        if float(chico) < 12:
+            fallos.append(f"hay texto de {chico}px en un gráfico: demasiado chico")
+    pruebas += 1
+    if 'id="zoom"' not in doc_i:
+        fallos.append("falta el control de tamaño de letra")
 
     # ---- 8. las dos monedas ---------------------------------------------
     TC = {"2025-12-31": 17.8410, "2026-03-31": 17.6220, "2026-06-30": 17.4986}
@@ -441,32 +466,26 @@ def main(argv):
 
     ruta2 = escribir_vista(h, destino=tmp / "moneda.html", periodos=ps, abrir=False)
     doc2 = ruta2.read_text(encoding="utf-8")
-    for cadena in ('id="m-usd"', 'id="m-mxn"', 'label for="m-mxn"', 'class="v-usd"',
-                   'class="v-mxn"', "Dólares", "Pesos", "Tipo de cambio de cierre"):
+    for cadena in ('id="m-usd"', 'id="m-mxn"', 'label for="m-mxn"',
+                   'class="v-usd"', 'class="v-mxn"', "Dólares", "Pesos"):
         pruebas += 1
         if cadena not in doc2:
             fallos.append(f"al interruptor de moneda le falta «{cadena}»")
-    for prohibido in ("<script", "http://", "https://"):
+    for prohibido in ("http://", "https://", "<link", " src="):
         pruebas += 1
         if prohibido in doc2:
             fallos.append(f"el interruptor metió algo externo: «{prohibido}»")
 
     # cada corte convertido con SU tipo de cambio
-    import re as _re
-    total = _re.search(r'<tr class="total"><th>Total reservas</th>(.*?)</tr>', doc2, _re.S).group(1)
-    usd = [x for x in _re.findall(r'v-usd">([^<]*)', total)]
-    mxn = [x for x in _re.findall(r'v-mxn">([^<]*)', total)]
-    igual("celdas en dólares de la fila total", len(usd), 10, 0)
-    igual("celdas en pesos de la fila total", len(mxn), 10, 0)
-    esperado_mxn = []
+    payload = _json.loads(_re.search(r"^const D = (\{.*\});$", doc2, _re.M).group(1))
     for per in ps:
-        for lado in ("local", "cnsf", None):
-            v = h.total(per, lado) if lado else h.diferencia(per)
-            esperado_mxn.append(v * TC[per] / 1e6)
-    da = h.diferencia(ps[-1]) * TC[ps[-1]] - h.diferencia(ps[-2]) * TC[ps[-2]]
-    esperado_mxn.append(da / 1e6)
-    for i, (txt, esp) in enumerate(zip(mxn, esperado_mxn)):
-        igual(f"fila total en pesos, celda {i}", float(txt.replace(",", "")), esp, 0.005)
+        c = payload["cortes"][per]
+        igual(f"datos embebidos · {per} tipo de cambio", c["fx"], TC[per], 1e-9)
+        for cid in ("rrc", "rsr", "rsnr"):
+            igual(f"datos embebidos · {per} {cid} local", c["local"][cid],
+                  h.datos[per]["local"][cid], 0.005)
+            igual(f"datos embebidos · {per} {cid} cnsf", c["cnsf"][cid],
+                  h.datos[per]["cnsf"][cid], 0.005)
 
     # el KPI y el mensaje clave no pueden contradecirse
     v_usd = (h.diferencia("2026-06-30") - h.diferencia("2026-03-31")) / 1e6

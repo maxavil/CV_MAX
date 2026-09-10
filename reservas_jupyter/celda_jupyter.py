@@ -63,6 +63,7 @@ DRIVER = "ODBC Driver 17 for SQL Server"
 TABLA_CARGAS = "ReservasQES_Cargas"           # una fila por archivo subido
 TABLA_DETALLE = "ReservasQES_Detalle"         # importes por corte y concepto
 VISTA_SQL = "vw_ReservasQES"                  # las dos, ya unidas, para consultar
+TABLA_MASTER = "ReservasQES_Master"           # qué carga es la buena de cada corte
 
 # Las tres ranuras de la vista, en el orden en que salen en la matriz.
 RANURAS = [("dic", "Diciembre"), ("t1", "t-1"), ("t", "t")]
@@ -954,6 +955,7 @@ class Repositorio:
             Column("periodo_min", String(10)),
             Column("periodo_max", String(10)),
             Column("filas", Integer),
+            Column("etiqueta", String(120)),      # cómo se llama esta versión
             Column("nota", String(400)),
         )
         detalle = Table(
@@ -968,7 +970,17 @@ class Repositorio:
             Column("metodo_estatutario", Numeric(20, 6)),
             PrimaryKeyConstraint("carga_id", "periodo", "concepto"),
         )
-        self._tablas = (md, cargas, detalle)
+        master = Table(
+            TABLA_MASTER, md,
+            Column("periodo", String(10), primary_key=True),
+            Column("carga_local", Integer, nullable=False),
+            Column("carga_cnsf", Integer),
+            Column("etiqueta", String(120)),
+            Column("usuario", String(128)),
+            Column("fecha", DateTime),
+            Column("nota", String(400)),
+        )
+        self._tablas = (md, cargas, detalle, master)
         return self._tablas
 
     def crear_base(self, nombre: "str | None" = None) -> bool:
@@ -1013,13 +1025,13 @@ class Repositorio:
         """¿Están ya las dos tablas? La primera vez, claro que no."""
         from sqlalchemy import inspect
         hay = set(inspect(self._asegura()).get_table_names(schema=self.esquema))
-        return {TABLA_CARGAS, TABLA_DETALLE} <= hay
+        return {TABLA_CARGAS, TABLA_DETALLE, TABLA_MASTER} <= hay
 
     def crear_esquema(self) -> "list[str]":
         """Crea las tablas si no existen. Es seguro repetirlo."""
         from sqlalchemy import inspect
         eng = self._asegura()
-        md, cargas, detalle = self.tablas()
+        md, cargas, detalle, _m = self.tablas()
         antes = set(inspect(eng).get_table_names(schema=self.esquema))
         md.create_all(eng, checkfirst=True)
         despues = set(inspect(eng).get_table_names(schema=self.esquema))
@@ -1054,17 +1066,17 @@ class Repositorio:
         """Cargas anteriores con la misma huella: el archivo ya está en el servidor."""
         from sqlalchemy import select
         eng = self._asegura()
-        _, cargas, _ = self.tablas()
+        _, cargas, _, _m = self.tablas()
         with eng.connect() as conn:
             return [r[0] for r in conn.execute(
                 select(cargas.c.carga_id).where(cargas.c.sha256 == sha))]
 
     def subir(self, lec: Lectura, usuario: "str | None" = None,
-              nota: "str | None" = None) -> int:
+              nota: "str | None" = None, etiqueta: "str | None" = None) -> int:
         """Guarda la lectura como una carga nueva y devuelve su carga_id."""
         from sqlalchemy import insert
         eng = self._asegura()
-        _, cargas, detalle = self.tablas()
+        _, cargas, detalle, _m = self.tablas()
         etiquetas = {c.id: (c.cuenta, c.label) for c in CONCEPTOS}
 
         filas = []
@@ -1090,6 +1102,7 @@ class Repositorio:
             "periodo_min": lec.cortes[0],
             "periodo_max": lec.cortes[-1],
             "filas": len(filas),
+            "etiqueta": (etiqueta or "")[:120] or None,
             "nota": (nota or "")[:400] or None,
         }
         with eng.begin() as conn:      # todo o nada: cabecera y detalle juntos
@@ -1109,13 +1122,14 @@ class Repositorio:
         eng = self._asegura()
         if not self.existe_esquema():
             return []
-        _, cargas, detalle = self.tablas()
+        _, cargas, detalle, _m = self.tablas()
         q = (select(cargas.c.carga_id, detalle.c.periodo, cargas.c.usuario,
                     cargas.c.fecha_carga, cargas.c.fuente, cargas.c.archivo,
-                    func.count().label("conceptos"))
+                    cargas.c.etiqueta, func.count().label("conceptos"))
              .select_from(cargas.join(detalle, cargas.c.carga_id == detalle.c.carga_id))
              .group_by(cargas.c.carga_id, detalle.c.periodo, cargas.c.usuario,
-                       cargas.c.fecha_carga, cargas.c.fuente, cargas.c.archivo)
+                       cargas.c.fecha_carga, cargas.c.fuente, cargas.c.archivo,
+                       cargas.c.etiqueta)
              .order_by(detalle.c.periodo.desc(), cargas.c.fecha_carga.desc()))
         with eng.connect() as conn:
             return [dict(r._mapping) for r in conn.execute(q)]
@@ -1124,7 +1138,7 @@ class Repositorio:
         """Los importes de un corte dentro de una carga."""
         from sqlalchemy import select
         eng = self._asegura()
-        _, _, detalle = self.tablas()
+        _, _, detalle, _m = self.tablas()
         q = select(detalle.c.concepto, detalle.c.metodologia_local,
                    detalle.c.metodo_estatutario).where(
             (detalle.c.carga_id == carga_id) & (detalle.c.periodo == periodo))
@@ -1136,6 +1150,97 @@ class Repositorio:
                 if cnsf is not None:
                     out["cnsf"][cid] = float(cnsf)
         return out
+
+    # ------------------------------------------------- versiones master
+    # De un mismo corte puede haber varias copias subidas. La master es la que
+    # vale: la que se usó para el cierre y la que sale en la vista. Queda
+    # anotado qué carga da cada columna, para que dentro de un año se pueda
+    # reconstruir exactamente lo que se presentó.
+
+    def marcar_master(self, periodo: str, carga_local: int,
+                      carga_cnsf: "int | None" = None, etiqueta: "str | None" = None,
+                      usuario: "str | None" = None, nota: "str | None" = None) -> None:
+        """Fija (o cambia) la versión master de un corte."""
+        from sqlalchemy import delete, insert
+        eng = self._asegura()
+        _, _, _, master = self.tablas()
+        fila = {
+            "periodo": periodo,
+            "carga_local": int(carga_local),
+            "carga_cnsf": int(carga_cnsf) if carga_cnsf else None,
+            "etiqueta": (etiqueta or "")[:120] or None,
+            "usuario": usuario or getpass.getuser(),
+            "fecha": dt.datetime.now(),
+            "nota": (nota or "")[:400] or None,
+        }
+        with eng.begin() as conn:      # se reemplaza: un corte, una master
+            conn.execute(delete(master).where(master.c.periodo == periodo))
+            conn.execute(insert(master), fila)
+
+    def quitar_master(self, periodo: str) -> bool:
+        """Saca un corte de los master. Las cargas no se tocan."""
+        from sqlalchemy import delete
+        eng = self._asegura()
+        _, _, _, master = self.tablas()
+        with eng.begin() as conn:
+            return conn.execute(delete(master).where(master.c.periodo == periodo)).rowcount > 0
+
+    def maestros(self) -> "list[dict[str, Any]]":
+        """Los cortes master, del más viejo al más nuevo."""
+        from sqlalchemy import select
+        eng = self._asegura()
+        _, _, _, master = self.tablas()
+        if not self.existe_esquema():
+            return []
+        with eng.connect() as conn:
+            return [dict(r._mapping) for r in
+                    conn.execute(select(master).order_by(master.c.periodo))]
+
+    def historico_master(self, ruta_json: "str | Path" = HIST_JSON) -> Historico:
+        """El Historico armado con las versiones master, y sólo con ellas."""
+        ms = self.maestros()
+        h = Historico(ruta_json)
+        h.datos = {}
+        if not ms:
+            return h
+        etiquetas = {s["carga_id"]: s for s in self.snapshots()}
+        for m in ms:
+            per = m["periodo"]
+            e = h._entrada(per)
+            loc = self.importes(m["carga_local"], per)
+            e["local"].update(loc["local"])
+            e["cnsf"].update(loc["cnsf"])
+            s_loc = etiquetas.get(m["carga_local"], {})
+            e["origen"]["local"] = (f"{str(s_loc.get('fuente', '')).capitalize()} · "
+                                    f"{s_loc.get('archivo', '?')} · #{m['carga_local']}")
+            if m["carga_cnsf"]:
+                cn = self.importes(m["carga_cnsf"], per)
+                e["cnsf"].update(cn["cnsf"])
+                e["local_actuarios"] = cn["local"]
+                s_cn = etiquetas.get(m["carga_cnsf"], {})
+                e["origen"]["cnsf"] = (f"Actuarios · {s_cn.get('archivo', '?')} "
+                                       f"· #{m['carga_cnsf']}")
+                for cid, val in cn["local"].items():
+                    e["local"].setdefault(cid, val)
+            elif loc["cnsf"]:
+                e["origen"]["cnsf"] = e["origen"]["local"]
+            if m.get("etiqueta"):
+                e["etiqueta"] = m["etiqueta"]
+            h._revisar(e)
+        return h
+
+    def master_sugerida(self, periodo: str) -> "tuple[int | None, int | None]":
+        """Qué cargas serían la master de un corte: la balanza y los actuarios
+        más nuevos que lo cubran."""
+        loc = cn = None
+        for s in self.snapshots():          # vienen de más nueva a más vieja
+            if s["periodo"] != periodo:
+                continue
+            if s["fuente"] == "balanza" and loc is None:
+                loc = s["carga_id"]
+            if s["fuente"] == "actuarios" and cn is None:
+                cn = s["carga_id"]
+        return (loc or cn), cn
 
     # --------------------------------------------------- armado del histórico
     def historico(self, seleccion: "Sequence[tuple[str, int]] | None" = None,
@@ -1213,7 +1318,7 @@ CSS = """
 }
 *{box-sizing:border-box}
 body{margin:0;background:var(--ground);color:var(--ink);font-family:var(--sans);
-     font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased}
+     font-size:18.9px;line-height:1.5;-webkit-font-smoothing:antialiased}
 .wrap{max-width:1260px;margin:0 auto;padding:28px 20px 56px;display:flex;flex-direction:column;gap:22px}
 h1,h2,h3{margin:0;font-family:var(--display);letter-spacing:.01em}
 p{margin:0}
@@ -1223,18 +1328,18 @@ p{margin:0}
 .board-head{padding:22px 24px 18px;display:grid;grid-template-columns:minmax(280px,1fr) auto;
             gap:20px;align-items:start;border-bottom:3px solid var(--plum)}
 @media (max-width:940px){.board-head{grid-template-columns:1fr}}
-.board-head h2{font-size:31px;font-weight:700;color:var(--plum);text-transform:uppercase;line-height:1}
-.board-head .tag{font-size:14.5px;color:var(--ink-2);margin-top:4px}
-.board-head .fx{font-family:var(--mono);font-size:12.5px;color:var(--teal);margin-top:10px}
+.board-head h2{font-size:39.06px;font-weight:700;color:var(--plum);text-transform:uppercase;line-height:1}
+.board-head .tag{font-size:18.27px;color:var(--ink-2);margin-top:4px}
+.board-head .fx{font-family:var(--mono);font-size:15.75px;color:var(--teal);margin-top:10px}
 
 .kpis{display:flex;gap:12px;flex-wrap:wrap}
 .kpi{border:1px solid var(--line);border-radius:5px;padding:11px 16px;min-width:176px;background:var(--ice-2)}
-.kpi .k-label{font-size:10.5px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:var(--teal-2)}
-.kpi .k-scope{font-size:11.5px;color:var(--ink-3)}
-.kpi .k-value{font-family:var(--display);font-size:27px;font-weight:700;color:var(--teal);
+.kpi .k-label{font-size:13.23px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:var(--teal-2)}
+.kpi .k-scope{font-size:14.49px;color:var(--ink-3)}
+.kpi .k-value{font-family:var(--display);font-size:34.02px;font-weight:700;color:var(--teal);
               line-height:1.1;margin-top:4px;font-variant-numeric:tabular-nums}
-.kpi .k-value .u{font-size:14px;color:var(--teal-2)}
-.kpi .k-alt{font-family:var(--mono);font-size:11.5px;color:var(--ink-3)}
+.kpi .k-value .u{font-size:17.64px;color:var(--teal-2)}
+.kpi .k-alt{font-family:var(--mono);font-size:14.49px;color:var(--ink-3)}
 .kpi.accent{background:#FBF1F7;border-color:#E4C6D8}
 .kpi.accent .k-label{color:var(--plum-soft)}
 .kpi.accent .k-value{color:var(--plum)}
@@ -1242,17 +1347,17 @@ p{margin:0}
 
 .table-wrap{overflow-x:auto}
 table.matrix{border-collapse:collapse;width:100%%;min-width:940px;font-variant-numeric:tabular-nums}
-table.matrix th,table.matrix td{padding:9px 12px;font-size:13px;border-bottom:1px solid var(--line-soft)}
-table.matrix thead th{color:#fff;font-family:var(--sans);font-weight:600;font-size:12px;
+table.matrix th,table.matrix td{padding:9px 12px;font-size:16.38px;border-bottom:1px solid var(--line-soft)}
+table.matrix thead th{color:#fff;font-family:var(--sans);font-weight:600;font-size:15.12px;
                       line-height:1.25;text-align:center;border-bottom:0}
-table.matrix thead .grp{background:var(--teal);font-family:var(--display);font-size:16px;
+table.matrix thead .grp{background:var(--teal);font-family:var(--display);font-size:20.16px;
                         letter-spacing:.02em;border-left:2px solid var(--paper)}
 table.matrix thead .sub-h{background:var(--teal-2);border-left:1px solid rgba(255,255,255,.25)}
 table.matrix thead .sub-h.first{border-left:2px solid var(--paper)}
 table.matrix thead .rowhead{background:var(--plum);text-align:left;font-family:var(--display);
-                            font-size:19px;text-transform:uppercase;vertical-align:middle;padding-left:16px}
+                            font-size:23.94px;text-transform:uppercase;vertical-align:middle;padding-left:16px}
 table.matrix thead .delta-h{background:var(--teal);border-left:2px solid var(--paper);vertical-align:middle}
-table.matrix tbody th{text-align:left;font-weight:500;font-size:13px;color:var(--ink);
+table.matrix tbody th{text-align:left;font-weight:500;font-size:16.38px;color:var(--ink);
                       padding-left:16px;background:var(--paper)}
 table.matrix tbody td{text-align:right;font-family:var(--mono);color:var(--ink)}
 table.matrix tbody tr:nth-child(even) th,table.matrix tbody tr:nth-child(even) td{background:var(--ice-2)}
@@ -1260,10 +1365,10 @@ table.matrix td.gstart{border-left:2px solid var(--line)}
 table.matrix td.dif{color:var(--plum);font-weight:500}
 table.matrix td.delta{border-left:2px solid var(--line);color:var(--teal)}
 table.matrix tr.total th,table.matrix tr.total td{background:var(--teal)!important;color:#fff;
-                                                  font-weight:700;font-size:14px;border-bottom:0}
-table.matrix tr.total th{font-family:var(--display);font-size:17px;text-transform:uppercase}
+                                                  font-weight:700;font-size:17.64px;border-bottom:0}
+table.matrix tr.total th{font-family:var(--display);font-size:21.42px;text-transform:uppercase}
 table.matrix tr.total td.dif,table.matrix tr.total td.delta{color:#fff}
-.board-foot{padding:10px 24px 16px;font-size:12px;color:var(--ink-2);display:flex;
+.board-foot{padding:10px 24px 16px;font-size:15.12px;color:var(--ink-2);display:flex;
             flex-direction:column;gap:3px}
 
 .band{display:grid;grid-template-columns:minmax(330px,1.35fr) minmax(300px,1fr);
@@ -1272,34 +1377,36 @@ table.matrix tr.total td.dif,table.matrix tr.total td.delta{color:#fff}
 .panel{padding:20px 24px;display:flex;flex-direction:column;gap:12px}
 .panel+.panel{border-left:1px solid var(--line-soft)}
 @media (max-width:940px){.panel+.panel{border-left:0;border-top:1px solid var(--line-soft)}}
-.panel h3{font-family:var(--sans);font-size:12px;font-weight:700;letter-spacing:.09em;
+.panel h3{font-family:var(--sans);font-size:15.12px;font-weight:700;letter-spacing:.09em;
           text-transform:uppercase;color:var(--teal-2)}
 .panel h3.plum{color:var(--plum-soft)}
-.chart-note{font-size:12px;color:var(--ink-3);font-family:var(--mono)}
-svg.wf{width:100%%;max-width:660px;height:auto;display:block}
-svg.ev{width:100%%;max-width:980px;height:auto;display:block}
+.chart-note{font-size:15.12px;color:var(--ink-3);font-family:var(--mono)}
+svg.wf,svg.ev{width:100%%;height:auto;display:block}
+.graf-wrap{overflow-x:auto;max-width:100%%}
+.band.ancha{grid-template-columns:1fr}
+.band.ancha .panel+.panel{border-left:0;border-top:1px solid var(--line-soft)}
 .legend{display:flex;flex-wrap:wrap;gap:16px;margin:2px 0 6px}
-.chip{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;color:var(--ink-2)}
+.chip{display:inline-flex;align-items:center;gap:7px;font-size:15.75px;color:var(--ink-2)}
 .chip i{width:11px;height:11px;border-radius:3px;display:inline-block}
 
 ul.keys{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:11px}
-ul.keys li{display:grid;grid-template-columns:16px 1fr;gap:9px;font-size:13.5px;line-height:1.5}
+ul.keys li{display:grid;grid-template-columns:16px 1fr;gap:9px;font-size:17.01px;line-height:1.5}
 ul.keys li::before{content:"";width:13px;height:13px;margin-top:5px;border-radius:50%%;
                    background:var(--teal-soft)}
 ul.byres{list-style:none;margin:0;padding:0}
 ul.byres li{display:flex;justify-content:space-between;align-items:baseline;gap:14px;
-            padding:8px 0;border-bottom:1px dotted var(--line);font-size:13.5px}
+            padding:8px 0;border-bottom:1px dotted var(--line);font-size:17.01px}
 ul.byres li:last-child{border-bottom:0;border-top:2px solid var(--plum);margin-top:2px;
                        padding-top:10px;font-weight:700;color:var(--plum)}
-ul.byres .v{font-family:var(--mono);font-size:13px;white-space:nowrap;text-align:right}
-ul.byres .v small{display:block;color:var(--ink-3);font-size:11.5px;font-weight:400}
+ul.byres .v{font-family:var(--mono);font-size:16.38px;white-space:nowrap;text-align:right}
+ul.byres .v small{display:block;color:var(--ink-3);font-size:14.49px;font-weight:400}
 ul.byres li>span>small{font-weight:400;color:var(--ink-3)}
 .note-box{background:var(--ice);border-left:3px solid var(--teal-soft);border-radius:0 4px 4px 0;
-          padding:12px 14px;font-size:13.5px;color:var(--ink)}
+          padding:12px 14px;font-size:17.01px;color:var(--ink)}
 .flags{background:#FDF4E1;border:1px solid #EBD6A5;border-left:4px solid %(warn)s;border-radius:4px;
-       padding:10px 14px;font-size:13px;color:#6B4A0A}
+       padding:10px 14px;font-size:16.38px;color:#6B4A0A}
 .flags ul{margin:6px 0 0;padding-left:18px}
-footer.credits{font-size:12px;color:var(--ink-3);text-align:center;font-family:var(--mono)}
+footer.credits{font-size:15.12px;color:var(--ink-3);text-align:center;font-family:var(--mono)}
 
 /* ---- el interruptor de moneda: sin una línea de JavaScript ---- */
 input.sw{position:absolute;width:0;height:0;opacity:0;pointer-events:none}
@@ -1309,7 +1416,7 @@ input.sw{position:absolute;width:0;height:0;opacity:0;pointer-events:none}
 #m-mxn:checked ~ .wrap text.v-mxn{display:inline}
 .switch{display:inline-flex;border:1px solid var(--line);border-radius:5px;overflow:hidden;
         background:var(--paper);margin-top:10px}
-.switch label{padding:6px 18px;font-size:12.5px;font-weight:600;color:var(--ink-2);
+.switch label{padding:6px 18px;font-size:15.75px;font-weight:600;color:var(--ink-2);
               cursor:pointer;user-select:none;border-right:1px solid var(--line);line-height:1.2}
 .switch label:last-child{border-right:0}
 .switch label:hover{background:var(--ice-2)}
@@ -1317,7 +1424,28 @@ input.sw{position:absolute;width:0;height:0;opacity:0;pointer-events:none}
 #m-mxn:checked ~ .wrap label[for=m-mxn]{background:var(--teal);color:#fff}
 #m-usd:focus-visible ~ .wrap label[for=m-usd],
 #m-mxn:focus-visible ~ .wrap label[for=m-mxn]{outline:2px solid var(--teal-2);outline-offset:-2px}
-.switch-note{font-size:11.5px;color:var(--ink-3);margin-top:5px;font-family:var(--mono)}
+.switch-note{font-size:14.49px;color:var(--ink-3);margin-top:5px;font-family:var(--mono)}
+.switch+.switch{margin-left:8px}
+#zoom label{font-family:var(--mono);font-size:13px}
+#zoom label.on{background:var(--teal);color:#fff}
+
+/* ---- los meses que el lector mete y saca de la vista ---- */
+.meses{padding:14px 24px 16px;border-bottom:1px solid var(--line-soft);background:var(--ice-2)}
+.meses-t{font-size:13px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;
+         color:var(--teal-2)}
+.meses-t small{font-weight:400;letter-spacing:0;text-transform:none;color:var(--ink-3);
+               font-size:13.5px;margin-left:8px}
+.meses-c{display:flex;flex-wrap:wrap;gap:9px;margin-top:9px}
+.mes{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--line);
+     background:var(--paper);border-radius:999px;padding:7px 15px;cursor:pointer;
+     font-size:15px;color:var(--ink);user-select:none}
+.mes:hover{border-color:var(--teal-soft)}
+.mes input{accent-color:var(--teal);width:16px;height:16px;margin:0;cursor:pointer}
+.mes.off{background:transparent;color:var(--ink-3)}
+.mes em{font-style:normal;font-size:13px;color:var(--ink-3);
+        border-left:1px solid var(--line);padding-left:8px}
+.meses-n{font-size:13.5px;color:var(--ink-3);margin-top:8px;font-family:var(--mono)}
+@media print{.meses,#zoom{display:none}}
 
 @media print{body{background:#fff}.board{border:0;box-shadow:none}
              footer.credits,.switch{display:none}}
@@ -1360,7 +1488,7 @@ def _svg_cascada(hist: Historico, periodos: "Sequence[str]",
             v, v_mxn = dif(b, c.id) - dif(a, c.id), dif_mxn(b, c.id) - dif_mxn(a, c.id)
             if abs(v) < 0.005:
                 continue
-            pasos.append(("delta", c.label.replace("Reserva de ", ""),
+            pasos.append(("delta", CORTO_RESERVA.get(c.id, c.label),
                           "Incremento" if v >= 0 else "Disminución", v, v_mxn))
         pasos.append(("base", etiqueta_corta(b), "Diferencia total", dif(b), dif_mxn(b)))
 
@@ -1377,21 +1505,24 @@ def _svg_cascada(hist: Historico, periodos: "Sequence[str]",
     tope = (maxv * 1.22) or 1.0
 
     n = len(geo)
-    hueco = 74 if n > 5 else 96          # se aprieta un poco cuando hay muchos
-    L, R, T, B = 52, 18, 46, 78
-    W, H = L + R + hueco * n, 330
-    bw = min(58.0, hueco * 0.54)
+    # el hueco NO se encoge: si hay muchas barras el lienzo crece y el panel se
+    # desplaza. Apretarlo hacía que las etiquetas del pie se encimaran.
+    hueco = 100
+    L, R, T, B = 52, 18, 46, 104
+    W, H = L + R + hueco * n, 356
+    bw = min(58.0, hueco * 0.52)
 
     def y(v: float) -> float:
         return T + (H - T - B) * (1 - v / tope)
 
-    o = [f'<svg class="wf" viewBox="0 0 {W} {H}" role="img" '
+    o = [f'<svg class="wf" viewBox="0 0 {W} {H}" style="min-width:{W}px" '
+         f'role="img" '
          f'aria-label="Cascada de la diferencia entre metodologías, corte a corte">',
          f'<line x1="{L - 8}" y1="{y(0):.1f}" x2="{W - R}" y2="{y(0):.1f}" '
          f'stroke="{LINE}" stroke-width="1" />']
     for clase, unidad in (("v-usd", "MM USD"), ("v-mxn", "MM MXN")):
         o.append(f'<text class="{clase}" x="{L - 8}" y="{T - 18}" fill="{INK_3}" '
-                 f'font-family="Consolas,monospace" font-size="11">'
+                 f'font-family="Consolas,monospace" font-size="13.86">'
                  f'Diferencia acumulada ({unidad})</text>')
 
     for i, (tipo, etq, sub, valor, valor_mxn, y0, y1) in enumerate(geo):
@@ -1406,11 +1537,11 @@ def _svg_cascada(hist: Historico, periodos: "Sequence[str]",
             o.append(f'<text class="{clase}" x="{cx:.1f}" y="{ya - 9:.1f}" '
                      f'text-anchor="middle" fill="{PLUM if tipo == "base" else TEAL}" '
                      f'font-family="Consolas,monospace" '
-                     f'font-size="{12 if n > 5 else 13}" font-weight="500">'
+                     f'font-size="17" font-weight="500">'
                      f'{signo}{abs(num):,.2f}</text>')
 
         # la etiqueta al pie, partida en renglones cortos
-        limite = 13 if n > 5 else 18
+        limite = 14
         renglones, actual_r = [], ""
         for palabra in etq.split(" "):
             if len((actual_r + " " + palabra).strip()) > limite:
@@ -1423,11 +1554,11 @@ def _svg_cascada(hist: Historico, periodos: "Sequence[str]",
                          for k, t in enumerate(renglones))
         o.append(f'<text y="{H - B + 20}" text-anchor="middle" fill="{INK}" '
                  f'font-family="Segoe UI,sans-serif" '
-                 f'font-size="{10.5 if n > 5 else 11.5}" '
+                 f'font-size="14.5" '
                  f'font-weight="{600 if tipo == "base" else 400}">{tspans}</text>')
-        o.append(f'<text x="{cx:.1f}" y="{H - B + 20 + len(renglones) * 12}" '
+        o.append(f'<text x="{cx:.1f}" y="{H - B + 22 + len(renglones) * 17}" '
                  f'text-anchor="middle" fill="{INK_3}" font-family="Segoe UI,sans-serif" '
-                 f'font-size="{9.5 if n > 5 else 10.5}">{esc(sub)}</text>')
+                 f'font-size="13">{esc(sub)}</text>')
 
         if i < n - 1:
             yfin = y(y1)
@@ -1439,55 +1570,257 @@ def _svg_cascada(hist: Historico, periodos: "Sequence[str]",
     return "\n".join(o)
 
 
-def construir_html(hist: Historico, periodos: "Sequence[str] | None" = None,
-                   fx: float = FX_DEFAULT, nota: str = NOTA_RELEVANTE,
-                   grafico: str = "cascada") -> str:
-    """Arma la vista completa en un solo archivo HTML, sin dependencias externas.
+# El motor que rehace la hoja cuando el lector marca o desmarca un mes. Va
+# dentro del propio HTML: no se descarga nada y el archivo sigue bastándose solo.
+_JS_VISTA = r"""
+const $ = (id) => document.getElementById(id);
+const n2 = (v) => v.toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2});
+const esc = (t) => String(t == null ? "" : t).replace(/&/g, "&amp;").replace(/</g, "&lt;")
+                    .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+const dual = (u, m) => `<span class="v-usd">${u}</span><span class="v-mxn">${m}</span>`;
+const celda = (v) => (v == null || Math.abs(v / 1e6) < 0.005) ? "—" : n2(v / 1e6);
+const dualMM = (v, fx) => dual(celda(v), v == null ? "—" : celda(v * fx));
 
-    Las cifras van en las dos monedas y el interruptor de arriba decide cuál se
-    ve. Cada corte se convierte con SU tipo de cambio de cierre: `fx` es el que
-    usan los cortes que no traigan el suyo.
+let sel = D.activos.slice();
+let barras = 0;          // cuántas barras trajo la última cascada
 
-    `grafico` decide qué va en el panel de abajo:
-      "cascada"   (por omisión) la cascada encadenada: una barra por cada corte
-                  elegido y, entre cada dos, el movimiento abierto por reserva.
-                  Con dos cortes es el puente de siempre; con cuatro son cuatro
-                  cascadas unidas;
-      "evolucion" una columna por corte, cuando se quiere leer sólo el nivel.
-    """
-    ps = list(periodos) if periodos else hist.periodos()[-PERIODOS_EN_VISTA:]
-    if not ps:
-        raise ValueError("El histórico está vacío: no hay nada que dibujar.")
-    actual = ps[-1]
-    previo = ps[-2] if len(ps) > 1 else None
-    tc = {p: hist.fx(p, fx) for p in ps}          # el tipo de cambio de cada cierre
+function dif(p, cid) {
+  const c = D.cortes[p];
+  if (!c) return null;
+  if (cid) {
+    const a = c.cnsf[cid], b = c.local[cid];
+    return (a == null || b == null) ? null : a - b;
+  }
+  const tc = total(p, "cnsf"), tl = total(p, "local");
+  return (tc == null || tl == null) ? null : tc - tl;
+}
+function total(p, lado) {
+  const c = D.cortes[p];
+  const v = D.conceptos.map((x) => c[lado][x.id]).filter((x) => x != null);
+  return v.length ? v.reduce((a, b) => a + b, 0) : null;
+}
+
+/* ---------------- la matriz ---------------- */
+function matriz(ps) {
+  const prev = ps.length > 1 ? ps[ps.length - 2] : null;
+  const act = ps[ps.length - 1];
+  let h1 = '<tr><th class="rowhead" rowspan="2">Reserva</th>', h2 = "<tr>";
+  ps.forEach((p) => {
+    h1 += `<th class="grp" colspan="3">${esc(D.cortes[p].largo)}</th>`;
+    h2 += '<th class="sub-h first">Metodología<br />local</th>'
+        + '<th class="sub-h">CNSF<br />Método Estatutario</th>'
+        + '<th class="sub-h">Diferencia<br />(estatutario − local)</th>';
+  });
+  if (prev) h1 += '<th class="delta-h" rowspan="2">Incremento<br />respecto de<br />'
+                + esc(D.cortes[prev].corto) + "</th>";
+  h1 += "</tr>"; h2 += "</tr>";
+
+  const fxA = act ? D.cortes[act].fx : 1, fxP = prev ? D.cortes[prev].fx : fxA;
+  const inc = (a, b) => (a == null || b == null) ? dual("—", "—")
+                        : dual(celda(a - b), celda(a * fxA - b * fxP));
+  let cuerpo = "";
+  D.conceptos.forEach((c) => {
+    cuerpo += `<tr><th>${esc(c.label)}${c.nota ? " *" : ""}</th>`;
+    ps.forEach((p) => {
+      const e = D.cortes[p], fx = e.fx;
+      cuerpo += `<td class="gstart">${dualMM(e.local[c.id], fx)}</td>`
+             +  `<td>${dualMM(e.cnsf[c.id], fx)}</td>`
+             +  `<td class="dif">${dualMM(dif(p, c.id), fx)}</td>`;
+    });
+    if (prev) cuerpo += `<td class="delta">${inc(dif(act, c.id), dif(prev, c.id))}</td>`;
+    cuerpo += "</tr>";
+  });
+  cuerpo += '<tr class="total"><th>Total reservas</th>';
+  ps.forEach((p) => {
+    const fx = D.cortes[p].fx;
+    cuerpo += `<td class="gstart">${dualMM(total(p, "local"), fx)}</td>`
+           +  `<td>${dualMM(total(p, "cnsf"), fx)}</td>`
+           +  `<td class="dif">${dualMM(dif(p), fx)}</td>`;
+  });
+  if (prev) cuerpo += `<td class="delta">${inc(dif(act), dif(prev))}</td>`;
+  cuerpo += "</tr>";
+  $("matriz").innerHTML = `<thead>${h1}${h2}</thead><tbody>${cuerpo}</tbody>`;
+}
+
+/* ---------------- la cascada encadenada ---------------- */
+function cascada(ps) {
+  const comp = ps.filter((p) => D.cortes[p].completo);
+  if (comp.length < 2) { barras = 0;
+    return '<p class="chart-note">Hacen falta al menos dos cortes '
+         + 'con las dos fuentes cargadas.</p>'; }
+  const mm = (p, c) => (dif(p, c) || 0) / 1e6;
+  const mx = (p, c) => (dif(p, c) || 0) * D.cortes[p].fx / 1e6;
+
+  const pasos = [["base", D.cortes[comp[0]].corto, "Diferencia total", mm(comp[0]), mx(comp[0])]];
+  for (let i = 0; i + 1 < comp.length; i++) {
+    const a = comp[i], b = comp[i + 1];
+    D.conceptos.forEach((c) => {
+      const v = mm(b, c.id) - mm(a, c.id), vx = mx(b, c.id) - mx(a, c.id);
+      if (Math.abs(v) < 0.005) return;
+      pasos.push(["delta", D.cortoReserva[c.id] || c.label,
+                  v >= 0 ? "Incremento" : "Disminución", v, vx]);
+    });
+    pasos.push(["base", D.cortes[b].corto, "Diferencia total", mm(b), mx(b)]);
+  }
+
+  let run = 0, geo = [], maxv = Math.max(...comp.map((p) => mm(p)));
+  pasos.forEach(([t, e, sub, v, vx]) => {
+    if (t === "base") { geo.push([t, e, sub, v, vx, 0, v]); run = v; }
+    else { geo.push([t, e, sub, v, vx, run, run + v]); run += v; maxv = Math.max(maxv, run); }
+  });
+  const tope = (maxv * 1.22) || 1;
+  const n = geo.length, hueco = 100;
+  barras = n;
+  const L = 52, R = 18, T = 46, B = 104, W = L + R + hueco * n, H = 356;
+  const bw = Math.min(58, hueco * 0.52);
+  const y = (v) => T + (H - T - B) * (1 - v / tope);
+  const o = [`<svg class="wf" viewBox="0 0 ${W} ${H}" style="min-width:${W}px" `
+           + `role="img" aria-label="Cascada de la diferencia entre metodologías">`,
+           `<line x1="${L - 8}" y1="${y(0).toFixed(1)}" x2="${W - R}" y2="${y(0).toFixed(1)}" `
+           + `stroke="${D.linea}" stroke-width="1" />`];
+  [["v-usd", "MM USD"], ["v-mxn", "MM MXN"]].forEach(([cl, u]) =>
+    o.push(`<text class="${cl}" x="${L - 8}" y="${T - 18}" fill="${D.tinta3}" `
+         + `font-family="Consolas,monospace" font-size="14">Diferencia acumulada (${u})</text>`));
+
+  geo.forEach(([t, etq, sub, v, vx, y0, y1], i) => {
+    const cx = L + hueco * i + hueco / 2;
+    const ya = y(Math.max(y0, y1)), yb = y(Math.min(y0, y1));
+    const alto = Math.max(3, yb - ya);
+    const fill = t === "base" ? D.colorBase : (v >= 0 ? D.colorSube : D.colorBaja);
+    o.push(`<rect x="${(cx - bw / 2).toFixed(1)}" y="${ya.toFixed(1)}" width="${bw.toFixed(1)}" `
+         + `height="${alto.toFixed(1)}" fill="${fill}" rx="1" />`);
+    const signo = t === "base" ? "" : (v >= 0 ? "+" : "−");
+    [["v-usd", v], ["v-mxn", vx]].forEach(([cl, num]) =>
+      o.push(`<text class="${cl}" x="${cx.toFixed(1)}" y="${(ya - 9).toFixed(1)}" `
+           + `text-anchor="middle" fill="${t === "base" ? D.plum : D.teal}" `
+           + `font-family="Consolas,monospace" font-size="17" `
+           + `font-weight="500">${signo}${n2(Math.abs(num))}</text>`));
+    const limite = 14;
+    let ren = [], act = "";
+    etq.split(" ").forEach((w) => {
+      if ((act + " " + w).trim().length > limite) { ren.push(act.trim()); act = w; }
+      else act += " " + w;
+    });
+    ren.push(act.trim());
+    const tsp = ren.map((t2, k) => `<tspan x="${cx.toFixed(1)}" dy="${k ? 17 : 0}">${esc(t2)}</tspan>`).join("");
+    o.push(`<text y="${H - B + 20}" text-anchor="middle" fill="${D.tinta}" `
+         + `font-family="Segoe UI,sans-serif" font-size="14.5" `
+         + `font-weight="${t === "base" ? 600 : 400}">${tsp}</text>`);
+    o.push(`<text x="${cx.toFixed(1)}" y="${H - B + 22 + ren.length * 17}" text-anchor="middle" `
+         + `fill="${D.tinta3}" font-family="Segoe UI,sans-serif" `
+         + `font-size="13">${esc(sub)}</text>`);
+    if (i < n - 1) {
+      const yf = y(y1);
+      o.push(`<line x1="${(cx + bw / 2).toFixed(1)}" y1="${yf.toFixed(1)}" `
+           + `x2="${(L + hueco * (i + 1) + hueco / 2 - bw / 2).toFixed(1)}" y2="${yf.toFixed(1)}" `
+           + `stroke="#9FB6C2" stroke-width="1" stroke-dasharray="4 3" />`);
+    }
+  });
+  o.push("</svg>");
+  return o.join("\n");
+}
+
+/* ---------------- pintar todo ---------------- */
+function pinta() {
+  sel = D.orden.filter((p) => sel.includes(p));
+  document.querySelectorAll("#meses input").forEach((i) => {
+    i.checked = sel.includes(i.dataset.p);
+    i.closest(".mes").classList.toggle("off", !i.checked);
+  });
+  if (!sel.length) {
+    $("matriz").innerHTML = '<tbody><tr><td style="padding:26px">Marca al menos un mes '
+                          + 'para armar la vista.</td></tr></tbody>';
+    ["kpis", "graf", "claves", "reservas", "avisos"].forEach((k) => ($(k).innerHTML = ""));
+    $("mesesn").textContent = "";
+    return;
+  }
+  const act = sel[sel.length - 1], prev = sel.length > 1 ? sel[sel.length - 2] : null;
+  const par = prev ? D.pares[prev + "|" + act] : null;
+
+  matriz(sel);
+  $("kpis").innerHTML = par ? par.kpis : D.solos[act].kpis;
+  $("claves").innerHTML = par ? par.mensajes : D.solos[act].mensajes;
+  $("reservas").innerHTML = D.solos[act].reservas;
+  $("treservas").textContent = "Diferencias a " + D.cortes[act].corto.toLowerCase()
+                             + " por reserva (estatutario − local)";
+
+  const comp = sel.filter((p) => D.cortes[p].completo);
+  $("tgraf").textContent = "Evolución de la diferencia entre metodologías"
+    + (comp.length > 1 ? ` · ${D.cortes[comp[0]].corto} → ${D.cortes[comp[comp.length - 1]].corto}` : "");
+  $("pgraf").innerHTML = dual("Millones de USD", "Millones de MXN") + " · "
+    + (comp.length > 2 ? `${comp.length} cortes encadenados; entre cada dos, el movimiento abierto por reserva`
+       : comp.length === 2 ? "movimiento abierto por reserva entre los dos cortes"
+       : "hace falta un corte anterior");
+  $("lgraf").innerHTML = comp.length > 1
+    ? `<span class="chip"><i style="background:${D.colorBase}"></i>Diferencia total del corte</span>`
+      + `<span class="chip"><i style="background:${D.colorSube}"></i>Incremento</span>`
+      + `<span class="chip"><i style="background:${D.colorBaja}"></i>Disminución</span>` : "";
+  $("graf").innerHTML = '<div class="graf-wrap">' + cascada(sel) + "</div>";
+  // Con muchas barras la cascada no cabe junto a los mensajes y se le da la fila
+  // entera. Se decide por el número de barras, no midiendo el panel: medirlo
+  // se realimenta, porque la propia clase cambia el ancho que se mide.
+  $("banda").classList.toggle("ancha", barras >= 6);
+
+  const fxs = [...new Set(sel.map((p) => D.cortes[p].fx.toFixed(4)))];
+  $("lineafx").textContent = fxs.length > 1
+    ? "Tipo de cambio de cierre · " + sel.map((p) => `${D.cortes[p].corto} ${D.cortes[p].fx.toFixed(4)}`).join(" · ") + " MXN/USD"
+    : `Tipo de cambio: ${fxs[0]} MXN / USD`;
+  $("mesesn").textContent = `${sel.length} de ${D.orden.length} meses en la vista`
+    + (sel.length < D.orden.length ? " · marca los demás para agregarlos" : "");
+  const org = D.cortes[act].origen || {};
+  $("fuentes").textContent = "fuentes: " + [org.local, org.cnsf].filter(Boolean).join(" · ");
+
+  const avisos = sel.filter((p) => D.cortes[p].aviso);
+  $("avisos").innerHTML = avisos.length
+    ? '<div class="flags"><strong>Revisar la metodología local</strong><ul>'
+      + avisos.map((p) => `<li>${esc(D.cortes[p].largo)}: ${esc(D.cortes[p].aviso)}</li>`).join("")
+      + "</ul></div>" : "";
+}
+
+document.querySelectorAll("#meses input").forEach((i) =>
+  i.addEventListener("change", () => {
+    const p = i.dataset.p;
+    sel = i.checked ? [...new Set([...sel, p])] : sel.filter((x) => x !== p);
+    pinta();
+  }));
+document.querySelectorAll("#zoom label").forEach((l) =>
+  l.addEventListener("click", () => {
+    document.querySelectorAll("#zoom label").forEach((x) => x.classList.remove("on"));
+    l.classList.add("on");
+    $("wrap").style.zoom = l.dataset.z;
+  }));
+$("wrap").style.zoom = "1.15";
+pinta();
+"""
+
+
+def _kpis_html(hist: Historico, actual: str, previo: "str | None",
+               tc: "dict[str, float]") -> str:
+    """Los tres indicadores de arriba, en las dos monedas."""
     fx_a = tc[actual]
-
     dif_actual = hist.diferencia(actual)
     d1 = dif_actual or 0.0
-
-    # ---------------------------------------------------------- indicadores
     if dif_actual is None:
         falta = "el archivo de actuarios" if hist.total(actual, "cnsf") is None else "la balanza"
-        kpis = [f'<div class="kpi"><div class="k-label">Diferencia total</div>'
+        return (f'<div class="kpi"><div class="k-label">Diferencia total</div>'
                 f'<div class="k-scope">{esc(etiqueta_corta(actual))}</div>'
                 f'<div class="k-value">n/d</div>'
-                f'<div class="k-alt">falta {falta} de este corte</div></div>']
-    else:
-        kpis = [f'<div class="kpi"><div class="k-label">Diferencia total</div>'
-                f'<div class="k-scope">{esc(etiqueta_corta(actual))}</div>'
-                f'<div class="k-value">{dual_texto("{sim} {n}", d1, fx_a)} '
-                f'<span class="u">MM</span></div>'
-                f'<div class="k-alt">'
-                + dual(f"~MXN {d1 * fx_a / 1e6:,.2f} MM al cierre",
-                       f"USD {d1 / 1e6:,.2f} MM · {fx_a:,.4f} MXN/USD")
-                + '</div></div>']
-    if previo and hist.completo(actual) and hist.completo(previo):
+                f'<div class="k-alt">falta {falta} de este corte</div></div>')
+
+    kpis = [f'<div class="kpi"><div class="k-label">Diferencia total</div>'
+            f'<div class="k-scope">{esc(etiqueta_corta(actual))}</div>'
+            f'<div class="k-value">{dual_texto("{sim} {n}", d1, fx_a)} '
+            f'<span class="u">MM</span></div>'
+            f'<div class="k-alt">'
+            + dual(f"~MXN {d1 * fx_a / 1e6:,.2f} MM al cierre",
+                   f"USD {d1 / 1e6:,.2f} MM · {fx_a:,.4f} MXN/USD")
+            + '</div></div>']
+    if previo and hist.completo(previo):
         d0 = hist.diferencia(previo) or 0.0
         fx_p = tc[previo]
         v = d1 - d0
-        # en pesos, el movimiento se mide con el cierre de cada mes a su propio
-        # tipo de cambio: así lleva dentro el efecto cambiario, como debe ser
+        # en pesos, cada cierre a su propio tipo de cambio: así lleva dentro el
+        # efecto cambiario, como debe ser
         v_mxn = d1 * fx_a - d0 * fx_p
         alcance = f"{etiqueta_corta(previo)} → {etiqueta_corta(actual)}"
         kpis.append(f'<div class="kpi accent"><div class="k-label">Variación del periodo</div>'
@@ -1510,12 +1843,57 @@ def construir_html(hist: Historico, periodos: "Sequence[str] | None" = None,
                     + dual(f"sobre USD {d0 / 1e6:,.2f} MM",
                            f"sobre MXN {d0 * fx_p / 1e6:,.2f} MM")
                     + '</div></div>')
+    return "".join(kpis)
 
-    # ---------------------------------------------------------------- matriz
+
+def _mensajes_html(hist: Historico, actual: str, previo: "str | None",
+                   tc: "dict[str, float]") -> str:
+    """Los mensajes clave, en las dos monedas."""
+    fx_a = tc[actual]
+    return "".join(
+        f'<li>{dual(esc(u), esc(m))}</li>'
+        for u, m in zip(hist.mensajes(actual, previo),
+                        hist.mensajes(actual, previo, fx=fx_a,
+                                      fx_previo=tc.get(previo, fx_a) if previo else fx_a)))
+
+
+def _por_reserva_html(hist: Historico, actual: str, tc: "dict[str, float]") -> str:
+    """La lista de diferencias por reserva del último corte."""
+    fx_a = tc[actual]
+    dif_actual = hist.diferencia(actual)
+    if dif_actual is None:
+        return ('<li><span>Este corte todavía no tiene las dos fuentes cargadas.</span>'
+                '<span class="v">n/d</span></li>')
+    out = ""
+    for c in CONCEPTOS:
+        d = hist.diferencia(actual, c.id)
+        if d is None or abs(d) < 5000:
+            continue
+        out += (f"<li><span>{esc(c.label)}</span>"
+                f'<span class="v">{dual_texto("{sim} {n} MM", d, fx_a)}'
+                f"<small>"
+                + dual(f"~MXN {d * fx_a / 1e6:,.2f} MM", f"USD {d / 1e6:,.2f} MM")
+                + "</small></span></li>")
+    out += ('<li><span>Total de reservas<br />'
+            '<small>incremento por constitución</small></span>'
+            f'<span class="v">{dual_texto("{sim} {n} MM", dif_actual, fx_a)}'
+            f"<small>"
+            + dual(f"~MXN {dif_actual * fx_a / 1e6:,.2f} MM",
+                   f"USD {dif_actual / 1e6:,.2f} MM")
+            + "</small></span></li>")
+    return out
+
+
+def _matriz_html(hist: Historico, ps: "Sequence[str]", tc: "dict[str, float]") -> str:
+    """La matriz, armada en Python. La usa el respaldo sin JavaScript."""
+    actual = ps[-1]
+    previo = ps[-2] if len(ps) > 1 else None
+    fx_a = tc[actual]
+
     h1 = '<tr><th class="rowhead" rowspan="2">Reserva</th>'
     h2 = "<tr>"
-    for p in ps:
-        h1 += f'<th class="grp" colspan="3">{esc(etiqueta_periodo(p))}</th>'
+    for p_ in ps:
+        h1 += f'<th class="grp" colspan="3">{esc(etiqueta_periodo(p_))}</th>'
         h2 += ('<th class="sub-h first">Metodología<br />local</th>'
                '<th class="sub-h">CNSF<br />Método Estatutario</th>'
                '<th class="sub-h">Diferencia<br />(estatutario − local)</th>')
@@ -1525,8 +1903,7 @@ def construir_html(hist: Historico, periodos: "Sequence[str] | None" = None,
     h1 += "</tr>"
     h2 += "</tr>"
 
-    def inc_dual(a: "float | None", b: "float | None") -> str:
-        """El incremento: en dólares es la resta; en pesos, cada corte a su cambio."""
+    def inc(a: "float | None", b: "float | None") -> str:
         if a is None or b is None:
             return dual("—", "—")
         return dual(celda_mm(a - b), celda_mm(a * fx_a - b * tc[previo]))
@@ -1534,144 +1911,134 @@ def construir_html(hist: Historico, periodos: "Sequence[str] | None" = None,
     cuerpo = ""
     for c in CONCEPTOS:
         cuerpo += f"<tr><th>{esc(c.label)}{' *' if c.nota else ''}</th>"
-        for p in ps:
-            e = hist.datos[p]
-            cuerpo += (f'<td class="gstart">{dual_mm(e["local"].get(c.id), tc[p])}</td>'
-                       f'<td>{dual_mm(e["cnsf"].get(c.id), tc[p])}</td>'
-                       f'<td class="dif">{dual_mm(hist.diferencia(p, c.id), tc[p])}</td>')
+        for p_ in ps:
+            e = hist.datos[p_]
+            cuerpo += (f'<td class="gstart">{dual_mm(e["local"].get(c.id), tc[p_])}</td>'
+                       f'<td>{dual_mm(e["cnsf"].get(c.id), tc[p_])}</td>'
+                       f'<td class="dif">{dual_mm(hist.diferencia(p_, c.id), tc[p_])}</td>')
         if previo:
             cuerpo += ('<td class="delta">'
-                       + inc_dual(hist.diferencia(actual, c.id),
-                                  hist.diferencia(previo, c.id)) + "</td>")
+                       + inc(hist.diferencia(actual, c.id), hist.diferencia(previo, c.id))
+                       + "</td>")
         cuerpo += "</tr>"
 
     cuerpo += '<tr class="total"><th>Total reservas</th>'
-    for p in ps:
-        cuerpo += (f'<td class="gstart">{dual_mm(hist.total(p, "local"), tc[p])}</td>'
-                   f'<td>{dual_mm(hist.total(p, "cnsf"), tc[p])}</td>'
-                   f'<td class="dif">{dual_mm(hist.diferencia(p), tc[p])}</td>')
+    for p_ in ps:
+        cuerpo += (f'<td class="gstart">{dual_mm(hist.total(p_, "local"), tc[p_])}</td>'
+                   f'<td>{dual_mm(hist.total(p_, "cnsf"), tc[p_])}</td>'
+                   f'<td class="dif">{dual_mm(hist.diferencia(p_), tc[p_])}</td>')
     if previo:
         cuerpo += ('<td class="delta">'
-                   + inc_dual(hist.diferencia(actual), hist.diferencia(previo)) + "</td>")
+                   + inc(hist.diferencia(actual), hist.diferencia(previo)) + "</td>")
     cuerpo += "</tr>"
+    return f'<table class="matrix"><thead>{h1}{h2}</thead><tbody>{cuerpo}</tbody></table>'
 
-    # ------------------------------------------------------- mensajes y listas
-    mensajes = "".join(
-        f'<li>{dual(esc(u), esc(m))}</li>'
-        for u, m in zip(hist.mensajes(actual, previo),
-                        hist.mensajes(actual, previo, fx=fx_a,
-                                      fx_previo=tc.get(previo, fx_a))))
 
-    por_reserva = ""
-    for c in CONCEPTOS:
-        d = hist.diferencia(actual, c.id)
-        if d is None or abs(d) < 5000:
-            continue
-        por_reserva += (f"<li><span>{esc(c.label)}</span>"
-                        f'<span class="v">{dual_texto("{sim} {n} MM", d, fx_a)}'
-                        f"<small>"
-                        + dual(f"~MXN {d * fx_a / 1e6:,.2f} MM", f"USD {d / 1e6:,.2f} MM")
-                        + "</small></span></li>")
-    if dif_actual is None:
-        por_reserva = ('<li><span>Este corte todavía no tiene las dos fuentes cargadas.</span>'
-                       '<span class="v">n/d</span></li>')
-    else:
-        por_reserva += ('<li><span>Total de reservas<br />'
-                        '<small>incremento por constitución</small></span>'
-                        f'<span class="v">{dual_texto("{sim} {n} MM", d1, fx_a)}'
-                        f"<small>"
-                        + dual(f"~MXN {d1 * fx_a / 1e6:,.2f} MM", f"USD {d1 / 1e6:,.2f} MM")
-                        + "</small></span></li>")
+def construir_html(hist: Historico, periodos: "Sequence[str] | None" = None,
+                   fx: float = FX_DEFAULT, nota: str = NOTA_RELEVANTE,
+                   grafico: str = "cascada",
+                   disponibles: "Sequence[str] | None" = None) -> str:
+    """Arma la vista en un solo archivo HTML, sin nada que descargar.
 
-    avisos = [f"{etiqueta_periodo(p)}: {hist.datos[p]['aviso']}"
-              for p in ps if hist.datos[p].get("aviso")]
-    banda_avisos = ""
-    if avisos:
-        banda_avisos = ('<div class="flags"><strong>Revisar la metodología local</strong>'
-                        "<ul>" + "".join(f"<li>{esc(a)}</li>" for a in avisos) + "</ul></div>")
+    El archivo lleva dentro TODOS los cortes de `disponibles` (por omisión, los
+    mismos que se muestran). El lector marca y desmarca meses arriba y la hoja
+    se rehace sola: matriz, indicadores, cascada, mensajes clave y diferencias
+    por reserva. Nada viaja a ningún servidor; el HTML se basta solo.
 
-    origen = hist.datos[actual].get("origen", {})
-    pie = " · ".join(filter(None, [origen.get("local"), origen.get("cnsf")])) or "—"
+    Las cifras van en las dos monedas y el interruptor decide cuál se ve. Cada
+    corte se convierte con SU tipo de cambio de cierre.
+    """
+    ps = list(periodos) if periodos else hist.periodos()[-PERIODOS_EN_VISTA:]
+    if not ps:
+        raise ValueError("El histórico está vacío: no hay nada que dibujar.")
+    todos = sorted(set(list(disponibles) if disponibles else []) | set(ps))
+    tc = {p: hist.fx(p, fx) for p in todos}
+
+    # ---- lo que el navegador necesita para rehacer la hoja ----------------
+    # Los textos que dependen de un par de cortes se dejan escritos aquí: son
+    # pocos y así la redacción sigue viviendo en un solo lugar, en Python.
+    cortes = {}
+    for p in todos:
+        e = hist.datos[p]
+        cortes[p] = {
+            "corto": etiqueta_corta(p), "largo": etiqueta_periodo(p),
+            "local": {c.id: e["local"].get(c.id) for c in CONCEPTOS},
+            "cnsf": {c.id: e["cnsf"].get(c.id) for c in CONCEPTOS},
+            "fx": tc[p], "completo": hist.completo(p),
+            "etiqueta": e.get("etiqueta"), "aviso": e.get("aviso"),
+            "origen": e.get("origen", {}),
+        }
+    pares, solos = {}, {}
+    for a in todos:
+        solos[a] = {"kpis": _kpis_html(hist, a, None, tc),
+                    "mensajes": _mensajes_html(hist, a, None, tc),
+                    "reservas": _por_reserva_html(hist, a, tc)}
+        for b in todos:
+            if b >= a:
+                continue
+            pares[f"{b}|{a}"] = {"kpis": _kpis_html(hist, a, b, tc),
+                                 "mensajes": _mensajes_html(hist, a, b, tc)}
+    datos = {
+        "conceptos": [{"id": c.id, "label": c.label, "nota": c.nota} for c in CONCEPTOS],
+        "cortes": cortes, "orden": todos, "activos": list(ps),
+        "pares": pares, "solos": solos, "grafico": grafico,
+        "colorBase": "#8E2A66", "colorSube": TEAL_2, "colorBaja": NEG,
+        "linea": LINE, "tinta": INK, "tinta3": INK_3, "plum": PLUM, "teal": TEAL,
+        "serieColor": SERIE_COLOR,
+        "cortoReserva": CORTO_RESERVA,
+    }
+
     sello = dt.datetime.now().strftime("%d/%m/%Y %H:%M")
-
-    # el gráfico del panel. El puente sólo abarca los dos últimos cortes: si la
-    # vista lleva más, hay que decirlo o parece que el gráfico no hizo caso.
-    completos = [p for p in ps if hist.completo(p)]
-    titulo_grafico = "Evolución de la diferencia entre metodologías"
-    series_g = [c for c in CONCEPTOS
-                if any(abs(hist.diferencia(p, c.id) or 0) >= 5000 for p in completos)]
-    if grafico == "evolucion" and len(completos) > 1:
-        pie_grafico = (f"{len(completos)} corte(s): "
-                       + ", ".join(etiqueta_corta(p) for p in completos))
-        leyenda_g = "".join(
-            f'<span class="chip"><i style="background:{SERIE_COLOR.get(c.id, TEAL)}"></i>'
-            f'{esc(c.label.replace("Reserva de ", ""))}</span>' for c in series_g)
-        cuerpo_grafico = (f'<div class="legend">{leyenda_g}</div>'
-                          + _svg_evolucion(hist, completos, fx_a))
-    else:
-        if len(completos) > 2:
-            titulo_grafico += (f" · {etiqueta_corta(completos[0])} → "
-                               f"{etiqueta_corta(completos[-1])}")
-            pie_grafico = (f"{len(completos)} cortes encadenados; entre cada dos, el "
-                           "movimiento abierto por reserva")
-        elif len(completos) == 2:
-            titulo_grafico += (f" · {etiqueta_corta(completos[0])} → "
-                               f"{etiqueta_corta(completos[1])}")
-            pie_grafico = "movimiento abierto por reserva entre los dos cortes"
-        else:
-            pie_grafico = "hace falta un corte anterior"
-        leyenda_g = ('<span class="chip"><i style="background:#8E2A66"></i>'
-                     'Diferencia total del corte</span>'
-                     f'<span class="chip"><i style="background:{TEAL_2}"></i>'
-                     'Incremento</span>'
-                     f'<span class="chip"><i style="background:{NEG}"></i>'
-                     'Disminución</span>')
-        cuerpo_grafico = (f'<div class="legend">{leyenda_g}</div>'
-                          + _svg_cascada(hist, completos, tc))
-
-    # el tipo de cambio que se enseña arriba: uno solo si todos coinciden
-    distintos = len({round(v, 6) for v in tc.values()}) > 1
-    if distintos:
-        linea_fx = ("Tipo de cambio de cierre · "
-                    + " · ".join(f"{etiqueta_corta(p)} {tc[p]:,.4f}" for p in ps)
-                    + " MXN/USD")
-    else:
-        linea_fx = f"Tipo de cambio: {fx_a:,.4f} MXN / USD"
+    casillas = "".join(
+        f'<label class="mes{"" if p in ps else " off"}">'
+        f'<input type="checkbox" data-p="{esc(p)}"{" checked" if p in ps else ""} />'
+        f'<span>{esc(etiqueta_corta(p))}</span>'
+        + (f'<em>{esc(cortes[p]["etiqueta"])}</em>' if cortes[p].get("etiqueta") else "")
+        + "</label>" for p in todos)
 
     return f"""<!DOCTYPE html>
 <html lang="es">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Reservas técnicas QES · {esc(etiqueta_corta(actual))}</title>
+<title>Reservas técnicas QES · {esc(etiqueta_corta(ps[-1]))}</title>
 <style>{CSS}</style>
 </head>
 <body>
 <input type="radio" name="moneda" id="m-usd" class="sw" checked />
 <input type="radio" name="moneda" id="m-mxn" class="sw" />
-<div class="wrap">
-{banda_avisos}
+<div class="wrap" id="wrap">
+  <div id="avisos"></div>
   <section class="board">
     <div class="board-head">
       <div>
         <h2>Resultados reservas técnicas QES</h2>
         <p class="tag">Comparativo de metodologías y evolución del diferencial</p>
-        <p class="fx">{esc(linea_fx)}</p>
+        <p class="fx" id="lineafx"></p>
         <div class="switch" role="group" aria-label="Moneda">
           <label for="m-usd">Dólares</label><label for="m-mxn">Pesos</label>
         </div>
-        <p class="switch-note">{
-            "Cada corte se convierte con su propio tipo de cambio de cierre."
-            if distintos else "Cifras en millones. Pica para cambiar de moneda."}</p>
+        <div class="switch" role="group" aria-label="Tamaño de letra" id="zoom">
+          <label data-z="1">Normal</label><label data-z="1.15" class="on">Grande</label><label data-z="1.35">Muy grande</label>
+        </div>
       </div>
-      <div class="kpis">{"".join(kpis)}</div>
+      <div class="kpis" id="kpis"></div>
     </div>
 
+    <div class="meses" id="meses">
+      <p class="meses-t">Meses en la vista <small>márcalos y la hoja se rehace sola</small></p>
+      <div class="meses-c">{casillas}</div>
+      <p class="meses-n" id="mesesn"></p>
+    </div>
+
+    <noscript>
+      <div class="flags">Con JavaScript apagado la hoja no se puede rehacer sola.
+        Abajo van los cortes con los que se generó: {esc(", ".join(etiqueta_corta(p) for p in ps))}.</div>
+      <div class="table-wrap">{_matriz_html(hist, ps, tc)}</div>
+      <div class="graf-wrap">{_svg_cascada(hist, [p for p in ps if hist.completo(p)], tc)}</div>
+    </noscript>
     <div class="table-wrap">
-      <table class="matrix">
-        <thead>{h1}{h2}</thead>
-        <tbody>{cuerpo}</tbody>
-      </table>
+      <table class="matrix" id="matriz"></table>
     </div>
     <div class="board-foot">
       <span>{dual("Cifras en millones de USD.", "Cifras en millones de MXN.")}
@@ -1680,23 +2047,23 @@ def construir_html(hist: Historico, periodos: "Sequence[str] | None" = None,
             es decir el exceso de constitución del método estatutario.</span>
     </div>
 
-    <div class="band">
+    <div class="band" id="banda">
       <div class="panel">
-        <h3>{esc(titulo_grafico)}</h3>
-        <p class="chart-note">{dual("Millones de USD", "Millones de MXN")} · {esc(pie_grafico)}</p>
-        {cuerpo_grafico}
+        <h3 id="tgraf"></h3>
+        <p class="chart-note" id="pgraf"></p>
+        <div class="legend" id="lgraf"></div>
+        <div id="graf"></div>
       </div>
       <div class="panel">
         <h3>Mensajes clave</h3>
-        <ul class="keys">{mensajes}</ul>
+        <ul class="keys" id="claves"></ul>
       </div>
     </div>
 
     <div class="band">
       <div class="panel">
-        <h3 class="plum">Diferencias a {esc(etiqueta_corta(actual).lower())} por reserva
-            (estatutario − local)</h3>
-        <ul class="byres">{por_reserva}</ul>
+        <h3 class="plum" id="treservas">Diferencias por reserva</h3>
+        <ul class="byres" id="reservas"></ul>
       </div>
       <div class="panel">
         <h3>Nota relevante</h3>
@@ -1705,8 +2072,13 @@ def construir_html(hist: Historico, periodos: "Sequence[str] | None" = None,
     </div>
   </section>
 
-  <footer class="credits">Reservas técnicas QES · armado en local el {sello} · fuentes: {esc(pie)}</footer>
+  <footer class="credits">Reservas técnicas QES · armado en local el {sello}
+     · <span id="fuentes"></span></footer>
 </div>
+<script>
+const D = {json.dumps(datos, ensure_ascii=False)};
+{_JS_VISTA}
+</script>
 </body>
 </html>
 """
@@ -1721,6 +2093,10 @@ def construir_html(hist: Historico, periodos: "Sequence[str] | None" = None,
 # deuteranopia). Aun así van con leyenda y etiqueta directa: el color nunca es
 # la única pista de qué es cada cosa.
 SERIE_COLOR = {"rrc": "#3E8AA6", "rsnr": "#5B1A44", "rsr": "#16252D"}
+
+# al pie de la cascada el nombre completo no cabe sin encimarse con el de al lado
+CORTO_RESERVA = {"rrc": "Riesgos en curso", "rsr": "Reportados",
+                 "rsnr": "No reportados"}
 
 
 def _paso_bonito(v: float) -> float:
@@ -1771,7 +2147,7 @@ def _svg_evolucion(hist: Historico, periodos: "Sequence[str]", fx: float) -> str
         ".ev .tip{opacity:0;pointer-events:none;transition:opacity .12s}",
         ".ev .col:hover .seg{filter:brightness(1.12)}",
     ] + [f".ev .c{i}:hover ~ .t{i}{{opacity:1}}" for i in range(len(ps))])
-    o = [f'<svg class="ev" viewBox="0 0 {W} {H}" role="img" '
+    o = [f'<svg class="ev" viewBox="0 0 {W} {H}" style="min-width:{W}px" role="img" '
          f'aria-label="Diferencia entre metodologías por corte, en millones de USD">',
          f'<style>{reglas}</style>']
 
@@ -1978,7 +2354,7 @@ table.ev-t tr.var th{font-weight:400;color:var(--ink-2);font-size:12px}
       <div class="panel">
         <h3>Diferencia por corte, abierta por reserva</h3>
         <div class="legend">{leyenda}</div>
-        {_svg_evolucion(hist, completos, fx)}
+        <div class="graf-wrap">{_svg_evolucion(hist, completos, fx)}</div>
         <p class="chart-note">{dual("Millones de USD", "Millones de MXN")} · pasa el
            cursor por una columna para ver el desglose{'' if not omitidos else ' · sin graficar: ' + esc(', '.join(etiqueta_corta(p) for p in omitidos)) + ' (falta una de las dos fuentes)'}</p>
       </div>
@@ -2022,13 +2398,20 @@ def escribir_evolucion(hist: Historico, destino: "str | Path | None" = None,
 def escribir_vista(hist: Historico, destino: "str | Path | None" = None,
                    periodos: "Sequence[str] | None" = None, fx: float = FX_DEFAULT,
                    nota: str = NOTA_RELEVANTE, abrir: bool = True,
-                   grafico: str = "cascada") -> Path:
-    """Escribe el HTML junto al notebook y lo abre en el navegador."""
+                   grafico: str = "cascada",
+                   disponibles: "Sequence[str] | None" = None) -> Path:
+    """Escribe el HTML junto al notebook y lo abre en el navegador.
+
+    `disponibles` son los cortes que viajan dentro del archivo para que el
+    lector los meta y saque; por omisión, todo el histórico.
+    """
     ps = list(periodos) if periodos else hist.periodos()[-PERIODOS_EN_VISTA:]
     if not ps:
         raise ValueError("El histórico está vacío: carga al menos un archivo.")
     ruta = Path(destino) if destino else hist.ruta.parent / f"vista_reservas_{ps[-1]}.html"
-    ruta.write_text(construir_html(hist, ps, fx, nota, grafico), encoding="utf-8")
+    ruta.write_text(construir_html(hist, ps, fx, nota, grafico,
+                                   disponibles if disponibles is not None else hist.periodos()),
+                    encoding="utf-8")
     if abrir:
         try:
             webbrowser.open_new_tab(ruta.resolve().as_uri())
@@ -2103,7 +2486,8 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
     hist = Historico(hist_ruta)
     repo = Repositorio(url=url_bd)
     pendientes: "dict[str, Lectura]" = {}
-    estado: "dict[str, Any]" = {"conectado": False, "snapshots": [], "nota": NOTA_RELEVANTE}
+    estado: "dict[str, Any]" = {"conectado": False, "snapshots": [], "master": [],
+                                "nota": NOTA_RELEVANTE}
     ancho_texto = ancho - 90
 
     # ---------------------------------------------------------- lienzo con barra
@@ -2174,6 +2558,17 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
     btn_esquema.pack(side="left", padx=(6, 0))
     btn_subir = ttk.Button(fila1, text="Subir al servidor", state="disabled")
     btn_subir.pack(side="left", padx=(6, 0))
+
+    fila2 = tk.Frame(srv, bg=PAPER)
+    fila2.pack(fill="x", padx=14, pady=(0, 6))
+    tk.Label(fila2, text="Etiqueta de esta subida", bg=PAPER, fg=INK_3,
+             font=(UI, 8, "bold")).pack(side="left")
+    etq_var = tk.StringVar(value=f"Cierre {dt.date.today():%b %Y}".capitalize())
+    tk.Entry(fila2, textvariable=etq_var, width=30, font=(UI, 9)).pack(side="left", padx=(6, 14))
+    btn_master = ttk.Button(fila2, text="Marcar como master", state="disabled")
+    btn_master.pack(side="left")
+    lbl_master = tk.Label(fila2, text="", bg=PAPER, fg=INK_3, font=(UI, 8))
+    lbl_master.pack(side="left", padx=(10, 0))
 
     lbl_srv = tk.Label(srv, text="Sin conectar · el histórico vive en el JSON local.",
                        bg=PAPER, fg=INK_3, font=(UI, 8), anchor="w",
@@ -2314,6 +2709,7 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
         btn_procesar.state(["!disabled"] if listo else ["disabled"])
         btn_evol.state(["!disabled"] if listo else ["disabled"])
         btn_esquema.state(["!disabled"] if estado["conectado"] else ["disabled"])
+        btn_master.state(["!disabled"] if estado["conectado"] else ["disabled"])
         btn_subir.state(["!disabled"] if (estado["conectado"] and hay) else ["disabled"])
 
     def carga_rutas(rutas: "Iterable[str]") -> None:
@@ -2422,7 +2818,7 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
                     apunta(f"· {lec.archivo}: no se subió, ya estaba como "
                            + ", ".join(f"#{c}" for c in previas), "warn")
                     continue
-                cid = repo.subir(lec)
+                cid = repo.subir(lec, etiqueta=etq_var.get().strip() or None)
                 apunta(f"· {lec.archivo} → servidor, carga #{cid} "
                        f"({len(lec.cortes)} corte(s): "
                        f"{', '.join(etiqueta_corta(p) for p in lec.cortes)})", "ok")
@@ -2430,8 +2826,42 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
                 apunta(f"! {lec.archivo}: no se pudo subir · {err}", "err")
         refresca_snapshots()
 
+    def marcar_master() -> None:
+        """Fija como master los cortes que están ahora en la vista."""
+        pares = seleccion() + [(p, None) for p, v in extra_vars.items() if v.get()]
+        if not pares:
+            apunta("! elige primero los cortes de la vista.", "err")
+            return
+        etq = etq_var.get().strip() or None
+        for per, carga in dict(pares).items():
+            try:
+                loc, cn = repo.master_sugerida(per)
+                repo.marcar_master(per, carga or loc, cn, etiqueta=etq)
+                apunta(f"· {etiqueta_corta(per)} queda como master "
+                       f"(local #{carga or loc}, cnsf #{cn})"
+                       + (f" · «{etq}»" if etq else ""), "ok")
+            except Exception as err:
+                apunta(f"! no se pudo marcar {etiqueta_corta(per)}: {err}", "err")
+        refresca_master()
+
+    def refresca_master() -> None:
+        if not estado["conectado"]:
+            lbl_master.configure(text="")
+            return
+        try:
+            estado["master"] = repo.maestros()
+        except Exception:
+            estado["master"] = []
+        n = len(estado["master"])
+        lbl_master.configure(
+            text=(f"{n} corte(s) master: "
+                  + ", ".join(etiqueta_corta(m["periodo"]) for m in estado["master"])
+                  if n else "todavía no hay cortes master"))
+        btn_master.state(["!disabled"] if estado["conectado"] else ["disabled"])
+
     btn_conectar.configure(command=conectar)
     btn_base.configure(command=crear_base)
+    btn_master.configure(command=marcar_master)
     btn_esquema.configure(command=crear_tablas)
     btn_subir.configure(command=subir)
 
@@ -2458,6 +2888,7 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
                 estado["snapshots"] = []
                 apunta(f"! no se pudo leer el catálogo: {err}", "err")
         llena_combos()
+        refresca_master()
         actualiza_botones()
 
     def llena_combos() -> None:
@@ -2594,8 +3025,11 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
             return
         apunta(f"· histórico local en {hist.ruta} ({len(hist.periodos())} corte(s))")
         try:
+            master = [m["periodo"] for m in estado.get("master", [])]
+            dentro = sorted(set(master or h.periodos()) | set(ps))
             ruta_html = escribir_vista(h, periodos=ps, fx=fx, nota=estado["nota"],
-                                       grafico=GRAFICOS.get(graf_var.get(), "cascada"))
+                                       grafico=GRAFICOS.get(graf_var.get(), "cascada"),
+                                       disponibles=[p for p in dentro if p in h.datos])
         except Exception as err:
             apunta(f"! no se pudo escribir la vista: {err}", "err")
             return
