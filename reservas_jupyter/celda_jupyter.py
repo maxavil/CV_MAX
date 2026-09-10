@@ -1398,7 +1398,12 @@ table.matrix tr.total td.dif,table.matrix tr.total td.delta{color:#fff}
 .band{display:grid;grid-template-columns:minmax(330px,1.35fr) minmax(300px,1fr);
       gap:0;border-top:1px solid var(--line-soft)}
 @media (max-width:940px){.band{grid-template-columns:1fr}}
-.panel{padding:20px 24px;display:flex;flex-direction:column;gap:12px}
+/* min-width:0 en toda la cadena: por omisión un hijo de rejilla o de flex vale
+   `min-width:auto` y crece hasta caber su contenido, así que el panel se
+   desbordaba y la cascada larga quedaba cortada en vez de poder desplazarse. */
+.band>*{min-width:0}
+.panel{padding:20px 24px;display:flex;flex-direction:column;gap:12px;min-width:0}
+.panel>*{min-width:0;max-width:100%%}
 .panel+.panel{border-left:1px solid var(--line-soft)}
 @media (max-width:940px){.panel+.panel{border-left:0;border-top:1px solid var(--line-soft)}}
 .panel h3{font-family:var(--sans);font-size:15.12px;font-weight:700;letter-spacing:.09em;
@@ -1406,7 +1411,10 @@ table.matrix tr.total td.dif,table.matrix tr.total td.delta{color:#fff}
 .panel h3.plum{color:var(--plum-soft)}
 .chart-note{font-size:15.12px;color:var(--ink-3);font-family:var(--mono)}
 svg.wf,svg.ev{width:100%%;height:auto;display:block}
-.graf-wrap{overflow-x:auto;max-width:100%%}
+.graf-wrap{overflow-x:auto;max-width:100%%;min-width:0}
+.graf-wrap::-webkit-scrollbar{height:12px}
+.graf-wrap::-webkit-scrollbar-thumb{background:var(--line);border-radius:6px}
+.graf-hint{font-size:13.5px;color:var(--ink-3);font-family:var(--mono);margin-top:4px}
 .band.ancha{grid-template-columns:1fr}
 .band.ancha .panel+.panel{border-left:0;border-top:1px solid var(--line-soft)}
 .legend{display:flex;flex-wrap:wrap;gap:16px;margin:2px 0 6px}
@@ -1780,6 +1788,15 @@ function pinta() {
       + `<span class="chip"><i style="background:${D.colorSube}"></i>Incremento</span>`
       + `<span class="chip"><i style="background:${D.colorBaja}"></i>Disminución</span>` : "";
   $("graf").innerHTML = '<div class="graf-wrap">' + cascada(sel) + "</div>";
+  // si el gráfico es más ancho que la hoja hay que decirlo: si no, parece cortado
+  const gw = $("graf").querySelector(".graf-wrap");
+  if (gw && gw.scrollWidth > gw.clientWidth + 2) {
+    const p = document.createElement("p");
+    p.className = "graf-hint";
+    p.textContent = `◂  el gráfico no cabe de un vistazo: desplázalo de lado para ver `
+                  + `los ${comp.length} cortes  ▸`;
+    $("graf").appendChild(p);
+  }
   // Con muchas barras la cascada no cabe junto a los mensajes y se le da la fila
   // entera. Se decide por el número de barras, no midiendo el panel: medirlo
   // se realimenta, porque la propia clase cambia el ancho que se mide.

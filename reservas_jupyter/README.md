@@ -241,7 +241,8 @@ caminar la diferencia corte a corte. Agregar o quitar cortes arriba cambia el
 dibujo: el gráfico nunca deja fuera un mes que está en la tabla.
 
 El lienzo crece con los cortes para que las etiquetas no se encimen, y lo que baja
-va en rojo. El desplegable «Gráfico de la vista» ofrece además columnas por corte,
+va en rojo. Cuando el gráfico ya no cabe de un vistazo, se desplaza de lado dentro
+de su panel y lo dice al pie; no se comprime ni se corta. El desplegable «Gráfico de la vista» ofrece además columnas por corte,
 para cuando sólo interesa el nivel y no el movimiento.
 
 ### Evolución de la diferencia
@@ -255,7 +256,7 @@ el color nunca sea la única pista.
 
 ## Comprobación
 
-`verificar.py` ejecuta el bloque sin abrir ventana y contrasta 366 cifras contra
+`verificar.py` ejecuta el bloque sin abrir ventana y contrasta 371 cifras contra
 los valores de control del cierre de junio 2026: los seis cortes concepto por
 concepto, la vista en millones, los indicadores, la estructura del HTML, el ida y
 vuelta completo por la base de datos (contra un SQLite, con el mismo código que

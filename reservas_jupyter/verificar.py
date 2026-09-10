@@ -478,6 +478,20 @@ def main(argv):
     if 'id="zoom"' not in doc_i:
         fallos.append("falta el control de tamaño de letra")
 
+    # un gráfico más ancho que la hoja tiene que poder desplazarse, no cortarse.
+    # Por omisión un hijo de rejilla o de flex vale min-width:auto y crece hasta
+    # caber su contenido: el panel se desbordaba y la cascada quedaba cortada.
+    for regla in (".band>*{min-width:0}", "min-width:0}", ".graf-wrap{overflow-x:auto"):
+        pruebas += 1
+        if regla not in css.replace(" ", ""):
+            fallos.append(f"falta «{regla}»: la cascada larga se cortaría")
+    pruebas += 1
+    if "min-width:0" not in css[css.index(".panel{"):css.index(".panel{") + 200]:
+        fallos.append("el panel no lleva min-width:0 y se desbordaría")
+    pruebas += 1
+    if "graf-hint" not in doc_i:
+        fallos.append("no avisa cuando el gráfico no cabe de un vistazo")
+
     # ---- 8. las dos monedas ---------------------------------------------
     TC = {"2025-12-31": 17.8410, "2026-03-31": 17.6220, "2026-06-30": 17.4986}
     for per, v in TC.items():
