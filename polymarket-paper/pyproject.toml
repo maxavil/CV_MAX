@@ -1,0 +1,61 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "polypaper"
+version = "0.0.1"
+description = "Paper-trading and edge-measurement harness for Polymarket. Simulation only: no real-money order path exists."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+# Pinned to the SDK generation that speaks CLOB V2. See docs/api-verification.md
+# for why py-clob-client (V1) is not and must not become a dependency.
+dependencies = [
+    "polymarket-client>=0.10.0,<0.11",
+    "pydantic>=2,<3",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pyright>=1.1.380",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+    "hypothesis>=6.100",
+]
+
+[project.scripts]
+# Phase 0 deliverable. Read-only by construction.
+polypaper-book = "polypaper.scripts_phase0:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/polypaper"]
+
+# ---------------------------------------------------------------------------
+# Typing. Strict is non-negotiable: the whole point of this system is that the
+# deterministic half cannot be talked into doing something by a bad string.
+# ---------------------------------------------------------------------------
+[tool.pyright]
+include = ["src", "scripts", "tests"]
+venvPath = "."
+venv = ".venv"
+pythonVersion = "3.11"
+typeCheckingMode = "strict"
+reportMissingTypeStubs = false
+reportUnnecessaryIsInstance = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "DTZ", "RUF"]
+# DTZ is deliberate: naive datetimes are a bug in this codebase. Everything
+# stored is UTC-aware; America/Mexico_City conversion happens in reporting only.
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

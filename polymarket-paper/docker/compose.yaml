@@ -1,0 +1,13 @@
+services:
+  phase0:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      TZ: UTC
+      REPORT_TIMEZONE: America/Mexico_City
+    volumes:
+      - ../data:/app/data
+    # No .env is mounted: Phase 0 needs no credentials, and the read-only
+    # interlock refuses to start if a signing key is visible.
+    command: ["--discover"]
