@@ -7,6 +7,7 @@ ventana, y contrasta contra los importes verificados uno por uno.
     python verificar.py Balanza_062026.xlsx ResultadosQES.xlsb
 """
 
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -592,6 +593,106 @@ def main(argv):
         pruebas += 1
         if "+10.3%" not in msg:
             fallos.append(f"el porcentaje en {etq} debería ser +10.3%: {msg[-90:]!r}")
+
+    # ---- 8 bis. el tipo de cambio traído de Banco de México --------------
+    # No se llama al SIE de verdad: se levanta un Banxico de mentiras con la
+    # forma real de la respuesta, para comprobar lo que de veras se puede
+    # equivocar —el cierre que cae en domingo, el token malo, la red caída—
+    # sin depender de que haya internet en la máquina que corre esto.
+    import threading as _th
+    from http.server import BaseHTTPRequestHandler as _BH, HTTPServer as _HS
+
+    DATOS_BMX = {  # el 31 de mayo de 2026 cae domingo: el último hábil es el 29
+        "SF43718": [{"fecha": "27/05/2026", "dato": "18.4012"},
+                    {"fecha": "28/05/2026", "dato": "18.3550"},
+                    {"fecha": "29/05/2026", "dato": "18.3120"},
+                    {"fecha": "30/05/2026", "dato": "N/E"},
+                    {"fecha": "31/05/2026", "dato": "N/E"}],
+        "VACIA": [{"fecha": "31/05/2026", "dato": "N/E"}],
+    }
+    pedidos = []
+
+    class _Falso(_BH):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            pedidos.append(self.path)
+            if self.headers.get("Bmx-Token") != "BUENO":
+                self.send_response(401)
+                self.end_headers()
+                self.wfile.write(b"{}")
+                return
+            serie = self.path.split("/series/")[1].split("/")[0]
+            cuerpo = _json.dumps({"bmx": {"series": [
+                {"idSerie": serie, "datos": DATOS_BMX.get(serie, [])}]}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(cuerpo)))
+            self.end_headers()
+            self.wfile.write(cuerpo)
+
+    srv = _HS(("127.0.0.1", 0), _Falso)
+    _th.Thread(target=srv.serve_forever, daemon=True).start()
+    BLOQUE["BANXICO_API"] = (f"http://127.0.0.1:{srv.server_port}"
+                             "/series/{serie}/datos/{ini}/{fin}")
+    os.environ["no_proxy"] = os.environ["NO_PROXY"] = "127.0.0.1,localhost"
+    tc_banxico = BLOQUE["tc_banxico"]
+    BanxicoError = BLOQUE["BanxicoError"]
+
+    igual("la serie es la de obligaciones (Fix)", BLOQUE["SERIE_FX_BANXICO"], "SF43718", 0)
+    v_, f_ = tc_banxico("2026-05-31", "BUENO")
+    igual("el cierre en domingo toma el último día hábil", v_, 18.3120, 1e-9)
+    igual("y dice de qué día es el dato", f_, "29/05/2026", 0)
+    pruebas += 1
+    if not pedidos[-1].endswith("/2026-05-17/2026-05-31"):
+        fallos.append(f"la ventana pedida a Banxico no acaba en el corte: {pedidos[-1]}")
+    for etq, args, trozo, corta in (
+            ("token inválido", ("2026-05-31", "MALO", "SF43718"), "no es válido", True),
+            ("serie sin dato", ("2026-05-31", "BUENO", "VACIA"), "no trae dato", False),
+            ("sin token", ("2026-05-31", "", "SF43718"), "falta el token", True)):
+        pruebas += 1
+        try:
+            tc_banxico(*args)
+            fallos.append(f"con {etq} debería tronar y no tronó")
+        except BanxicoError as err:
+            if trozo not in str(err) or err.corta is not corta:
+                fallos.append(f"con {etq} se obtuvo {str(err)!r} / corta={err.corta}")
+
+    # lo tecleado a mano manda: completar_fx no pisa un tipo de cambio puesto
+    hb = Historico(tmp / "bmx.json")
+    for per_ in ("2026-04-30", "2026-05-31"):
+        hb.datos[per_] = {"periodo": per_, "local": {}, "cnsf": {}, "origen": {}}
+    hb.poner_fx("2026-04-30", 19.9999)
+    lineas = hb.completar_fx("BUENO", ["2026-04-30", "2026-05-31"])
+    igual("no pisa el tipo de cambio tecleado", hb.fx("2026-04-30"), 19.9999, 1e-9)
+    igual("y rellena el que faltaba", hb.fx("2026-05-31"), 18.3120, 1e-9)
+    igual("una línea de bitácora por corte traído", len(lineas), 1, 0)
+
+    # con la red caída se rinde al primero: seis esperas seguidas dejarían la
+    # ventana congelada casi un minuto
+    srv.shutdown()
+    hb2 = Historico(tmp / "bmx2.json")
+    for per_ in ("2026-03-31", "2026-04-30", "2026-05-31"):
+        hb2.datos[per_] = {"periodo": per_, "local": {}, "cnsf": {}, "origen": {}}
+    lineas = hb2.completar_fx("BUENO")
+    pruebas += 1
+    if len(lineas) != 2 or "fallarían igual" not in lineas[1]:
+        fallos.append(f"con la red caída no se rinde al primer corte: {lineas}")
+    pruebas += 1
+    if any(hb2.datos[x].get("fx") for x in hb2.datos):
+        fallos.append("con la red caída inventó un tipo de cambio")
+    igual("sin token no se pide nada", len(hb2.completar_fx("")), 1, 0)
+
+    # el token: la variable de entorno manda sobre el archivo
+    ruta_tok = tmp / "tok.txt"
+    BLOQUE["guardar_token_banxico"]("DEL-ARCHIVO", ruta_tok)
+    os.environ.pop(BLOQUE["BANXICO_TOKEN_ENV"], None)
+    igual("el token se lee del archivo", BLOQUE["token_banxico"](ruta_tok), "DEL-ARCHIVO", 0)
+    os.environ[BLOQUE["BANXICO_TOKEN_ENV"]] = "DEL-ENTORNO"
+    igual("y la variable de entorno manda", BLOQUE["token_banxico"](ruta_tok), "DEL-ENTORNO", 0)
+    os.environ.pop(BLOQUE["BANXICO_TOKEN_ENV"], None)
+    igual("sin nada, cadena vacía", BLOQUE["token_banxico"](tmp / "no-existe.txt"), "", 0)
 
     # los gráficos también traen las dos monedas
     pruebas += 1

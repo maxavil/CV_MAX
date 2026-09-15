@@ -1,0 +1,6 @@
+# El token del SIE de Banxico es una credencial: vive junto al notebook, no aquí.
+banxico_token.txt
+# Lo que el bloque escribe al correr
+historico_reservas.json
+vista_reservas_*.html
+evolucion_diferencia.html

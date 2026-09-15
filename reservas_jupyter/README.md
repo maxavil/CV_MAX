@@ -26,9 +26,9 @@ reservas_jupyter/
    muestra qué leyó de cada uno antes de procesar nada.
 4. **Conectar** al servidor de auditoría, **Crear tablas** (solo la primera vez)
    y **Subir al servidor** para dejar la copia del mes.
-5. Elige las tres tablas de la vista en los desplegables: *Diciembre · t-1 · t*,
-   y el tipo de cambio de Banco de México al cierre de cada una. Si quieres más
-   columnas, marca los cortes adicionales de abajo.
+5. Elige las tres tablas de la vista en los desplegables: *Diciembre · t-1 · t*.
+   El tipo de cambio de cierre lo trae solo de Banco de México; si prefieres,
+   tecléalo. Si quieres más columnas, marca los cortes adicionales de abajo.
 6. Pica **Procesar**. Se escribe `vista_reservas_AAAA-MM-DD.html` junto al
    notebook y se abre en el navegador. **Ver evolución** escribe
    `evolucion_diferencia.html` con la diferencia mes con mes.
@@ -227,6 +227,38 @@ Cambiar la master de un mes no toca las cargas: la copia anterior sigue ahí y s
 puede volver a ella. Los cortes master son los que viajan dentro del HTML para
 que el lector los meta y los saque.
 
+### El tipo de cambio lo trae solo de Banxico
+
+El botón **Traer TC de Banxico** pide al SIE de Banco de México el tipo de cambio
+de cierre de cada corte que no lo tenga, y lo guarda en el histórico. Al picar
+**Procesar** o **Ver evolución** se hace solo, sin botón de por medio: la idea es
+que a fin de mes ya esté ahí y no haya que batallar.
+
+La serie es **SF43718**, que se llama con todas sus letras *«Tipo de cambio Pesos
+mexicanos por Dólar E.U.A. para solventar obligaciones en moneda extranjera (fecha
+de determinación — Fix)»*: exactamente la que pide el cierre.
+
+**El token.** El SIE es gratis pero pide un token, que se saca en un minuto en
+`banxico.org.mx/SieAPIRest/service/v1/token`. Se pega en la casilla **Token SIE**
+de la ventana y queda guardado en `banxico_token.txt`, junto al notebook, para no
+volver a teclearlo; también se lee de la variable de entorno `BANXICO_TOKEN`. Es
+una credencial de sólo lectura de series públicas, pero va en texto plano: el
+`.gitignore` ya la excluye.
+
+**Lo que hace bien.** El cierre cae en sábado, domingo o feriado con mucha
+frecuencia —el 31 de diciembre, sin ir más lejos— y esos días la serie no trae
+dato. Por eso no se pide un día suelto sino una ventana de dos semanas que termina
+en el corte, y se toma el último dato que haya: el del último día hábil del mes.
+Lo que ya tenga tipo de cambio no se toca, así que lo tecleado a mano siempre
+manda. Y si la red está caída se rinde en el primer corte en vez de esperar seis
+veces seguidas y dejar la ventana congelada un minuto.
+
+**Lo que pasa si no hay red.** Nada se rompe. Sin token, sin salida a internet o
+con el sitio bloqueado por la red de la empresa, la ventana lo dice una vez y todo
+sigue funcionando igual que antes: el tipo de cambio se teclea a mano. Esta es la
+única parte del bloque que toca la red, y lo único que viaja es una fecha y el
+número de serie — los importes nunca salen del equipo.
+
 ### Dólares o pesos, con un botón
 
 Las dos vistas traen arriba un interruptor **Dólares / Pesos**. El HTML guarda
@@ -234,9 +266,9 @@ las cifras en las dos monedas y el CSS enseña la que el lector eligió, así qu
 sigue sin una línea de JavaScript y se puede mandar por correo tal cual.
 
 **El ancla del tipo de cambio.** Cada corte viaja con el tipo de cambio de Banco
-de México a SU cierre —el de obligaciones a esa fecha—, que se escribe junto a
-cada columna en la ventana y se guarda en el histórico; el que se deje en blanco
-usa el tipo de cambio general. Pero los pesos que se ven salen de **uno solo** de
+de México a SU cierre —el de obligaciones a esa fecha—, que el app trae solo (ver
+abajo) o que se teclea junto a cada columna en la ventana; el que quede en blanco
+y no se haya podido traer usa el tipo de cambio general. Pero los pesos que se ven salen de **uno solo** de
 ellos: el ancla, que el HTML trae en un desplegable arriba y que por omisión es
 la del último corte de la vista.
 
@@ -273,7 +305,7 @@ etiqueta directa, para que el color nunca sea la única pista.
 
 ## Comprobación
 
-`verificar.py` ejecuta el bloque sin abrir ventana y contrasta 403 cifras contra
+`verificar.py` ejecuta el bloque sin abrir ventana y contrasta 419 cifras contra
 los valores de control del cierre de junio 2026: los seis cortes concepto por
 concepto, la vista en millones, los indicadores, la estructura del HTML, el ida y
 vuelta completo por la base de datos (contra un SQLite, con el mismo código que
@@ -281,7 +313,10 @@ corre en SQL Server), la página de evolución, el interruptor de moneda y el an
 de cambio —celda por celda, comprobando que el indicador y el mensaje clave digan
 la misma variación y que ninguna conversión se quede leyendo el cierre del corte
 que pinta en vez del ancla—, la vista plana del servidor y el
-rechazo de nombres de base inválidos. Arma además la tablita de los actuarios tal
+rechazo de nombres de base inválidos. Para el tipo de cambio de Banxico levanta un
+SIE de mentiras con la forma real de la respuesta —no llama a la red— y comprueba
+lo que de veras se puede equivocar: el cierre que cae en domingo, el token malo,
+la serie sin dato, la red caída y que no se pise lo tecleado a mano. Arma además la tablita de los actuarios tal
 como la mandan —título del corte, las tres reservas y su Total— en las tres formas
 en que puede venir el importe, y comprueba que el cruce trae la columna estatutaria
 y que el desajuste contra la balanza se avisa, cargando en los dos órdenes.

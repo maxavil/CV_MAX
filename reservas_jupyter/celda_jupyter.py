@@ -7,7 +7,9 @@
 #  de actuarios (.xlsb), picas «Procesar» y se escribe un HTML autocontenido
 #  junto al notebook, que se abre solo en el navegador.
 #
-#  Nada sale del equipo: todo se lee y se arma en local.
+#  Los importes no salen del equipo: todo se lee y se arma en local. Lo único
+#  que toca la red es traer el tipo de cambio de Banco de México, y sólo si se
+#  le pone token; sin él, se teclea a mano y todo lo demás funciona igual.
 #  Requisitos: openpyxl (para .xlsx) y pyxlsb (para .xlsb).
 #      pip install openpyxl pyxlsb
 #  Opcional, para arrastrar y soltar:  pip install tkinterdnd2
@@ -25,7 +27,9 @@ import platform
 import re
 import sys
 import unicodedata
+import urllib.error
 import urllib.parse
+import urllib.request
 import webbrowser
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -257,6 +261,106 @@ def dual_texto(plantilla: str, v: float, fx: float) -> str:
         esc(plantilla.format(sim="USD", n=f"{v / 1e6:,.2f}")),
         esc(plantilla.format(sim="MXN", n=f"{v * fx / 1e6:,.2f}")),
     )
+
+
+# -----------------------------------------------------------------------------
+# 2 bis. El tipo de cambio de Banco de México
+# -----------------------------------------------------------------------------
+#
+# La serie SF43718 del SIE se llama, con todas sus letras, «Tipo de cambio Pesos
+# mexicanos por Dólar E.U.A. para solventar obligaciones en moneda extranjera
+# (fecha de determinación - Fix)»: exactamente la que pide el cierre. Se consulta
+# por el API del SIE, que es gratis pero pide un token; se saca en un minuto en
+# https://www.banxico.org.mx/SieAPIRest/service/v1/token
+#
+# Esto es lo ÚNICO del bloque que toca la red, y sólo cuando hay token. Sin
+# token, sin salida a internet o con el sitio bloqueado por la red de la empresa,
+# la ventana sigue funcionando igual que siempre: se teclea el tipo de cambio a
+# mano y no se pierde nada. Los importes nunca salen del equipo: lo que viaja es
+# una fecha y el número de serie.
+#
+# El cierre cae en sábado, domingo o feriado con mucha frecuencia —el 31 de
+# diciembre, sin ir más lejos— y esos días la serie no trae dato. Por eso no se
+# pide un día suelto sino una ventana de dos semanas que termina en el corte, y
+# se toma el último dato que haya: el del último día hábil del mes.
+
+SERIE_FX_BANXICO = "SF43718"
+BANXICO_API = ("https://www.banxico.org.mx/SieAPIRest/service/v1/series"
+               "/{serie}/datos/{ini}/{fin}")
+BANXICO_TOKEN_ENV = "BANXICO_TOKEN"
+BANXICO_TOKEN_ARCHIVO = "banxico_token.txt"
+BANXICO_ESPERA = 8           # segundos antes de darse por vencido
+BANXICO_DIAS_ATRAS = 14      # ventana hacia atrás, por fines de semana y feriados
+
+
+class BanxicoError(RuntimeError):
+    """No se pudo traer el tipo de cambio.
+
+    `corta` dice si tiene caso seguir preguntando por los demás cortes: un token
+    inválido o una red cerrada van a fallar igual seis veces, y seis esperas
+    seguidas dejan la ventana congelada un minuto entero.
+    """
+
+    def __init__(self, mensaje: str, corta: bool = True):
+        super().__init__(mensaje)
+        self.corta = corta
+
+
+def token_banxico(ruta: "str | Path | None" = None) -> str:
+    """El token del SIE: primero la variable de entorno, luego el archivo."""
+    tok = (os.environ.get(BANXICO_TOKEN_ENV) or "").strip()
+    if tok:
+        return tok
+    try:
+        return Path(ruta or BANXICO_TOKEN_ARCHIVO).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def guardar_token_banxico(token: str, ruta: "str | Path | None" = None) -> Path:
+    """Deja el token junto al notebook para no volver a teclearlo.
+
+    Va en texto plano. Es una credencial de sólo lectura de series públicas y no
+    da acceso a nada más, pero conviene no subir ese archivo al repositorio.
+    """
+    p = Path(ruta or BANXICO_TOKEN_ARCHIVO)
+    p.write_text(token.strip() + "\n", encoding="utf-8")
+    return p
+
+
+def tc_banxico(periodo: str, token: str, serie: str = SERIE_FX_BANXICO,
+               espera: int = BANXICO_ESPERA,
+               dias_atras: int = BANXICO_DIAS_ATRAS) -> "tuple[float, str]":
+    """El tipo de cambio de cierre de ese corte, y la fecha real del dato."""
+    if not token:
+        raise BanxicoError("falta el token del SIE de Banxico")
+    try:
+        fin = dt.date.fromisoformat(periodo)
+    except ValueError as err:
+        raise BanxicoError(f"«{periodo}» no es una fecha de corte", corta=False) from err
+    ini = fin - dt.timedelta(days=dias_atras)
+    url = BANXICO_API.format(serie=serie, ini=ini.isoformat(), fin=fin.isoformat())
+    pet = urllib.request.Request(url, headers={"Bmx-Token": token,
+                                               "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(pet, timeout=espera) as r:
+            cuerpo = json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as err:
+        if err.code in (401, 403):
+            raise BanxicoError("el token del SIE no es válido o ya venció") from err
+        raise BanxicoError(f"Banxico respondió {err.code}") from err
+    except urllib.error.URLError as err:
+        raise BanxicoError(f"no se pudo llegar a Banxico ({err.reason})") from err
+    except (ValueError, OSError) as err:
+        raise BanxicoError(f"respuesta ilegible de Banxico ({err})") from err
+
+    series = (cuerpo.get("bmx") or {}).get("series") or []
+    datos = (series[0].get("datos") if series else None) or []
+    for d in reversed(datos):        # el último del rango es el del cierre
+        v = to_num(d.get("dato"))    # los días sin dato vienen como «N/E»
+        if v:
+            return v, str(d.get("fecha") or "")
+    raise BanxicoError(f"la serie {serie} no trae dato hasta el {periodo}", corta=False)
 
 
 # -----------------------------------------------------------------------------
@@ -677,6 +781,44 @@ class Historico:
             self.datos[periodo]["fx"] = float(valor)
         else:
             self.datos[periodo].pop("fx", None)
+
+    def completar_fx(self, token: "str | None" = None,
+                     periodos: "Iterable[str] | None" = None,
+                     forzar: bool = False,
+                     serie: str = SERIE_FX_BANXICO) -> "list[str]":
+        """Le pide a Banxico el tipo de cambio de los cortes que no lo tienen.
+
+        Devuelve la bitácora de lo que hizo, sin lanzar nada: si no hay token o
+        no hay red lo dice y deja el histórico exactamente como estaba. Por
+        omisión sólo toca los cortes sin tipo de cambio, para no pisar lo que el
+        usuario haya tecleado a mano; con `forzar` los vuelve a pedir todos.
+        """
+        ps = list(periodos) if periodos is not None else self.periodos()
+        faltan = [p for p in ps
+                  if p in self.datos and (forzar or not self.datos[p].get("fx"))]
+        if not faltan:
+            return []
+        tok = token if token is not None else token_banxico()
+        if not tok:
+            return ["! sin token del SIE: el tipo de cambio de "
+                    + ", ".join(etiqueta_corta(p) for p in faltan)
+                    + " se queda como esté. Pégalo en «Token SIE» y vuelve a picar."]
+        avisos = []
+        for p in faltan:
+            try:
+                v, fecha = tc_banxico(p, tok, serie)
+            except BanxicoError as err:
+                avisos.append(f"! {etiqueta_corta(p)}: {err}")
+                if err.corta:
+                    restantes = faltan[faltan.index(p) + 1:]
+                    if restantes:
+                        avisos.append("  no se piden los demás cortes: fallarían igual.")
+                    break
+                continue
+            self.poner_fx(p, v)
+            avisos.append(f"· {etiqueta_corta(p)}: {v:,.4f} MXN/USD "
+                          f"(Banxico {serie}, dato del {fecha})")
+        return avisos
 
     def incremento(self, actual: str, previo: str, cid: "str | None" = None) -> "float | None":
         a, b = self.diferencia(actual, cid), self.diferencia(previo, cid)
@@ -2580,7 +2722,7 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
     repo = Repositorio(url=url_bd)
     pendientes: "dict[str, Lectura]" = {}
     estado: "dict[str, Any]" = {"conectado": False, "snapshots": [], "master": [],
-                                "nota": NOTA_RELEVANTE}
+                                "nota": NOTA_RELEVANTE, "aviso_token": False}
     ancho_texto = ancho - 90
 
     # ---------------------------------------------------------- lienzo con barra
@@ -2731,13 +2873,34 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
         tk.Entry(rejilla, textvariable=var, width=9, font=(MONO, 9)).grid(
             row=r, column=2, sticky="w", pady=2, padx=(8, 0))
         fx_ranura[clave] = var
-    tk.Label(sel, text="Anota el tipo de cambio de Banco de México al cierre de cada mes "
-                       "(el de obligaciones a ese corte). En blanco usa el de abajo. La vista "
-                       "guarda las dos monedas, con un botón para cambiar entre ellas, y "
-                       "convierte TODO con uno solo de estos: el ancla, que por omisión es la "
-                       "del último corte y que el lector puede cambiar desde el propio HTML.",
+    tk.Label(sel, text="El tipo de cambio es el de Banco de México al cierre de cada mes "
+                       "(el de obligaciones a ese corte). Se trae solo con el botón de abajo; "
+                       "también se puede teclear, y lo tecleado manda. En blanco usa el de "
+                       "abajo del todo. La vista guarda las dos monedas, con un botón para "
+                       "cambiar entre ellas, y convierte TODO con uno solo de estos: el ancla, "
+                       "que por omisión es la del último corte y que el lector puede cambiar "
+                       "desde el propio HTML.",
              bg=PAPER, fg=INK_3, font=(UI, 8), anchor="w",
              wraplength=ancho_texto, justify="left").pack(fill="x", padx=14, pady=(2, 6))
+
+    # ---- el tipo de cambio, traído de Banco de México -----------------------
+    bmx = tk.Frame(sel, bg=PAPER)
+    bmx.pack(fill="x", padx=14, pady=(0, 6))
+    btn_bmx = ttk.Button(bmx, text="Traer TC de Banxico")
+    btn_bmx.pack(side="left")
+    tk.Label(bmx, text="Token SIE", bg=PAPER, fg=INK_3,
+             font=(UI, 8, "bold")).pack(side="left", padx=(12, 6))
+    token_var = tk.StringVar(value=token_banxico())
+    tk.Entry(bmx, textvariable=token_var, font=(MONO, 8), show="•").pack(
+        side="left", fill="x", expand=True)
+    tk.Label(sel, text="El token es gratis y se saca en un minuto en "
+                       "banxico.org.mx/SieAPIRest/service/v1/token. Se guarda junto al "
+                       "notebook para no volver a teclearlo, y también se lee de la variable "
+                       "de entorno BANXICO_TOKEN. Es lo único del bloque que toca la red: sin "
+                       "token, o con el sitio bloqueado, todo sigue igual y el tipo de cambio "
+                       "se teclea a mano.",
+             bg=PAPER, fg=INK_3, font=(UI, 8), anchor="w",
+             wraplength=ancho_texto, justify="left").pack(fill="x", padx=14, pady=(0, 6))
 
     # ---- cortes de más, para cuando la vista deba llevar más de tres --------
     extra_marco = tk.Frame(sel, bg=PAPER)
@@ -3261,6 +3424,50 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
                 continue
             hist.poner_fx(per, v)
 
+    def token_actual() -> str:
+        """El token escrito en la ventana; si es nuevo, se guarda para la próxima."""
+        tok = token_var.get().strip()
+        guardado = token_banxico()
+        if tok and tok != guardado:
+            try:
+                apunta(f"· token del SIE guardado en {guardar_token_banxico(tok)}")
+            except OSError as err:
+                apunta(f"! no se pudo guardar el token: {err}", "warn")
+        return tok or guardado
+
+    def trae_tc(periodos: "Sequence[str] | None" = None, auto: bool = False) -> None:
+        """Le pide a Banxico el tipo de cambio de los cortes que no lo tienen.
+
+        En automático (al procesar) no molesta: si no hay token lo dice una vez
+        por sesión y se queda callado el resto.
+        """
+        ps = list(periodos) if periodos is not None else hist.periodos()
+        faltan = [p for p in ps if p in hist.datos and not hist.datos[p].get("fx")]
+        if not faltan:
+            if auto:
+                return
+            apunta("· no hay cortes en el histórico todavía: carga un archivo primero."
+                   if not ps else "· todos los cortes ya traen tipo de cambio de cierre.")
+            return
+        tok = token_actual()
+        if not tok:
+            if auto and estado["aviso_token"]:
+                return
+            estado["aviso_token"] = True
+            apunta("· sin token del SIE no se puede traer el tipo de cambio de Banxico. "
+                   "Sácalo en banxico.org.mx/SieAPIRest/service/v1/token, pégalo en "
+                   "«Token SIE» y vuelve a picar; mientras, tecléalo a mano.", "warn")
+            return
+        apunta(f"· consultando Banxico ({SERIE_FX_BANXICO}) para "
+               + ", ".join(etiqueta_corta(x) for x in faltan) + "…")
+        root.update_idletasks()
+        for linea in hist.completar_fx(tok, faltan):
+            apunta(linea, "warn" if linea.startswith("!") else "ok")
+        hist.guardar()
+        for clave, _etq in RANURAS:      # que las casillas enseñen lo que llegó
+            fx_ranura[clave].set("")
+        refresca_fx()
+
     def historico_de_la_vista() -> "tuple[Historico, list[str]]":
         """El Historico y los periodos que le tocan, según lo elegido arriba."""
         pares = seleccion()
@@ -3311,6 +3518,7 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
         fx = tipo_de_cambio()
         funde_pendientes()
         guarda_fx()
+        trae_tc(auto=True)          # el cierre que no traiga TC se pide solo
         hist.guardar()
         h, ps = historico_de_la_vista()
         if not ps:
@@ -3364,6 +3572,7 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
         fx = tipo_de_cambio()
         funde_pendientes()
         guarda_fx()
+        trae_tc(auto=True)
         hist.guardar()
         if estado["conectado"] and estado["snapshots"]:
             h = repo.historico(ruta_json=hist.ruta)   # todo lo que haya en el servidor
@@ -3393,6 +3602,9 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
 
     btn_procesar.configure(command=procesar)
     btn_evol.configure(command=evolucion)
+    # el botón funde lo pendiente primero: si no, en frío no habría cortes que pedir
+    btn_bmx.configure(command=lambda: (funde_pendientes(), guarda_fx(),
+                                       hist.guardar(), trae_tc()))
 
     # ------------------------------------------------------------ arranque
     apunta(f"· histórico local: {Path(hist_ruta).resolve()} ({len(hist.periodos())} corte(s))")
@@ -3435,13 +3647,17 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
 
 
 def procesar_sin_ventana(*archivos: "str | Path", hist_ruta: "str | Path" = HIST_JSON,
-                         fx: float = FX_DEFAULT, abrir: bool = True) -> Path:
+                         fx: float = FX_DEFAULT, abrir: bool = True,
+                         banxico: bool = True) -> Path:
     """Misma lectura y misma vista, sin interfaz: útil sin escritorio o por lotes."""
     hist = Historico(hist_ruta)
     # los actuarios primero: para la columna local manda la balanza
     for ruta in sorted(archivos, key=lambda r: Path(r).suffix.lower() != ".xlsb"):
         for aviso in hist.procesar(ruta):
             print("·", aviso)
+    if banxico:
+        for aviso in hist.completar_fx():
+            print(aviso)
     hist.guardar()
     print()
     print(hist.vista_texto())
