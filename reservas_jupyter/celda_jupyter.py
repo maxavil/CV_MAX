@@ -292,6 +292,18 @@ BANXICO_TOKEN_ARCHIVO = "banxico_token.txt"
 BANXICO_ESPERA = 8           # segundos antes de darse por vencido
 BANXICO_DIAS_ATRAS = 14      # ventana hacia atrás, por fines de semana y feriados
 
+# Los tokens del SIE, en el orden en que se prueban: si Banxico rechaza uno
+# —caducó, lo revocaron, se pasó de consultas— se pasa al siguiente sin que el
+# usuario se entere. Poner aquí el tuyo hace que el bloque funcione recién
+# pegado, sin archivos sueltos que andar copiando de máquina en máquina.
+#
+# OJO con dónde vive este archivo: un token escrito aquí queda a la vista de
+# quien lea el bloque. Si va a un repositorio público, ponlo mejor en
+# banxico_token.txt (que el .gitignore ya excluye) o en la variable de entorno
+# BANXICO_TOKEN. Tampoco es el fin del mundo: el token es de sólo lectura de
+# series públicas y sacar otro toma un minuto.
+TOKENS_BANXICO: "list[str]" = []
+
 
 class BanxicoError(RuntimeError):
     """No se pudo traer el tipo de cambio.
@@ -299,22 +311,42 @@ class BanxicoError(RuntimeError):
     `corta` dice si tiene caso seguir preguntando por los demás cortes: un token
     inválido o una red cerrada van a fallar igual seis veces, y seis esperas
     seguidas dejan la ventana congelada un minuto entero.
+
+    `rechazado` marca el caso en que Banxico dijo que no al token —caducado,
+    revocado, pasado de consultas—, que es el único que se arregla probando con
+    el siguiente token de la lista.
     """
 
-    def __init__(self, mensaje: str, corta: bool = True):
+    def __init__(self, mensaje: str, corta: bool = True, rechazado: bool = False):
         super().__init__(mensaje)
         self.corta = corta
+        self.rechazado = rechazado
+
+
+def tokens_banxico(ruta: "str | Path | None" = None) -> "list[str]":
+    """Los tokens a probar, en orden: la variable de entorno, el archivo, el bloque.
+
+    Sin repetidos y sin vacíos, para no gastar una consulta dos veces con el
+    mismo token ni mandar una cadena en blanco.
+    """
+    orden = [(os.environ.get(BANXICO_TOKEN_ENV) or "").strip()]
+    try:
+        orden.append(Path(ruta or BANXICO_TOKEN_ARCHIVO).read_text(encoding="utf-8").strip())
+    except OSError:
+        pass
+    orden += [str(t).strip() for t in TOKENS_BANXICO]
+    vistos, salida = set(), []
+    for t in orden:
+        if t and t not in vistos:
+            vistos.add(t)
+            salida.append(t)
+    return salida
 
 
 def token_banxico(ruta: "str | Path | None" = None) -> str:
-    """El token del SIE: primero la variable de entorno, luego el archivo."""
-    tok = (os.environ.get(BANXICO_TOKEN_ENV) or "").strip()
-    if tok:
-        return tok
-    try:
-        return Path(ruta or BANXICO_TOKEN_ARCHIVO).read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
+    """El primero de los tokens, o cadena vacía si no hay ninguno."""
+    toks = tokens_banxico(ruta)
+    return toks[0] if toks else ""
 
 
 def guardar_token_banxico(token: str, ruta: "str | Path | None" = None) -> Path:
@@ -328,11 +360,36 @@ def guardar_token_banxico(token: str, ruta: "str | Path | None" = None) -> Path:
     return p
 
 
-def tc_banxico(periodo: str, token: str, serie: str = SERIE_FX_BANXICO,
+def _consulta_banxico(url: str, token: str, espera: int) -> "dict[str, Any]":
+    """Una consulta al SIE, con los errores ya traducidos a algo legible."""
+    pet = urllib.request.Request(url, headers={"Bmx-Token": token,
+                                               "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(pet, timeout=espera) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as err:
+        if err.code in (401, 403):
+            raise BanxicoError("el token del SIE no es válido o ya venció",
+                               rechazado=True) from err
+        raise BanxicoError(f"Banxico respondió {err.code}") from err
+    except urllib.error.URLError as err:
+        raise BanxicoError(f"no se pudo llegar a Banxico ({err.reason})") from err
+    except (ValueError, OSError) as err:
+        raise BanxicoError(f"respuesta ilegible de Banxico ({err})") from err
+
+
+def tc_banxico(periodo: str, token: "str | Sequence[str]",
+               serie: str = SERIE_FX_BANXICO,
                espera: int = BANXICO_ESPERA,
                dias_atras: int = BANXICO_DIAS_ATRAS) -> "tuple[float, str]":
-    """El tipo de cambio de cierre de ese corte, y la fecha real del dato."""
-    if not token:
+    """El tipo de cambio de cierre de ese corte, y la fecha real del dato.
+
+    `token` puede ser uno o varios: si Banxico rechaza el primero se prueba el
+    siguiente, que es justo para lo que sirve tener más de uno guardado.
+    """
+    toks = [token] if isinstance(token, str) else list(token)
+    toks = [t.strip() for t in toks if t and t.strip()]
+    if not toks:
         raise BanxicoError("falta el token del SIE de Banxico")
     try:
         fin = dt.date.fromisoformat(periodo)
@@ -340,19 +397,18 @@ def tc_banxico(periodo: str, token: str, serie: str = SERIE_FX_BANXICO,
         raise BanxicoError(f"«{periodo}» no es una fecha de corte", corta=False) from err
     ini = fin - dt.timedelta(days=dias_atras)
     url = BANXICO_API.format(serie=serie, ini=ini.isoformat(), fin=fin.isoformat())
-    pet = urllib.request.Request(url, headers={"Bmx-Token": token,
-                                               "Accept": "application/json"})
-    try:
-        with urllib.request.urlopen(pet, timeout=espera) as r:
-            cuerpo = json.loads(r.read().decode("utf-8"))
-    except urllib.error.HTTPError as err:
-        if err.code in (401, 403):
-            raise BanxicoError("el token del SIE no es válido o ya venció") from err
-        raise BanxicoError(f"Banxico respondió {err.code}") from err
-    except urllib.error.URLError as err:
-        raise BanxicoError(f"no se pudo llegar a Banxico ({err.reason})") from err
-    except (ValueError, OSError) as err:
-        raise BanxicoError(f"respuesta ilegible de Banxico ({err})") from err
+
+    cuerpo, ultimo = None, None
+    for t in toks:
+        try:
+            cuerpo = _consulta_banxico(url, t, espera)
+            break
+        except BanxicoError as err:
+            ultimo = err
+            if not err.rechazado:      # sólo el token rechazado se arregla cambiándolo
+                raise
+    if cuerpo is None:
+        raise ultimo or BanxicoError("no se pudo consultar a Banxico")
 
     series = (cuerpo.get("bmx") or {}).get("series") or []
     datos = (series[0].get("datos") if series else None) or []
@@ -782,7 +838,7 @@ class Historico:
         else:
             self.datos[periodo].pop("fx", None)
 
-    def completar_fx(self, token: "str | None" = None,
+    def completar_fx(self, token: "str | Sequence[str] | None" = None,
                      periodos: "Iterable[str] | None" = None,
                      forzar: bool = False,
                      serie: str = SERIE_FX_BANXICO) -> "list[str]":
@@ -798,7 +854,7 @@ class Historico:
                   if p in self.datos and (forzar or not self.datos[p].get("fx"))]
         if not faltan:
             return []
-        tok = token if token is not None else token_banxico()
+        tok = token if token is not None else tokens_banxico()
         if not tok:
             return ["! sin token del SIE: el tipo de cambio de "
                     + ", ".join(etiqueta_corta(p) for p in faltan)
@@ -2656,6 +2712,597 @@ def escribir_vista(hist: Historico, destino: "str | Path | None" = None,
 
 
 # -----------------------------------------------------------------------------
+# 7 ter. La vista de dirección: una sola página para el CFO y el consejo
+# -----------------------------------------------------------------------------
+#
+# El tablero operativo de arriba sirve para trabajar: trae todos los cortes, se
+# arma y se desarma, abre la cascada por reserva. Esta página es otra cosa y por
+# eso es otro archivo: es un documento. Se imprime, se manda por correo, se
+# proyecta, y no cambia entre quien la abre y quien la recibe.
+#
+# Contesta cuatro preguntas en ese orden, que es el orden en que las hace quien
+# firma los estados financieros:
+#
+#   1. ¿De cuánto es la brecha?          → la cifra sola, grande, arriba.
+#   2. ¿Sobre qué base?                  → mancuernas: libros contra estatutario.
+#   3. ¿Va creciendo?                    → la trayectoria de la brecha.
+#   4. ¿De dónde sale?                   → la apertura por reserva.
+#
+# Decisiones de dibujo, para que no se discutan cada vez:
+#
+# · Una sola cifra heroica en toda la página. Si hay tres, no hay ninguna.
+# · Las mancuernas en lugar de barras apiladas o de dos barras juntas: lo que
+#   importa no es cuánto mide cada metodología sino LA DISTANCIA entre las dos,
+#   y en las mancuernas esa distancia es literalmente el trazo que las une.
+# · Los ejes arrancan en cero. Cortarlos exageraría la brecha, que es justo de lo
+#   que nos van a acusar.
+# · Un solo color por gráfico donde hay una sola serie, y nada de números encima
+#   de cada punto: sólo los extremos. Lo demás vive en la tabla de respaldo, que
+#   va completa al pie para que nadie tenga que confiar en un tooltip.
+# · Los colores pasaron el validador de daltonismo: lila contra vino separan
+#   ΔE 19 en deuteranopia y 20 a vista normal. Aun así cada punto va con leyenda
+#   y con etiqueta, porque el color nunca es la única pista.
+
+UI_CSS = "Segoe UI,-apple-system,Helvetica,Arial,sans-serif"
+MONO_CSS = "Consolas,SFMono-Regular,Menlo,monospace"
+
+DIR_LOCAL = LILA_2          # metodología local: lo que está en libros
+DIR_CNSF = PLUM             # método estatutario: lo que pediría constituir
+DIR_BRECHA = "#C9B8E4"      # el trazo que une las dos: la brecha
+
+
+def _proporcion(local: float, cnsf: float) -> str:
+    """Cuánto supera el estatutario a los libros, dicho como se entiende.
+
+    Por debajo de tres veces se lee mejor en por ciento («+41% sobre libros»);
+    arriba de eso el por ciento se vuelve ilegible y las veces dicen más.
+    """
+    if local is None or cnsf is None or abs(cnsf - local) < 5000:
+        return "coinciden"
+    if local <= 0:
+        return "sin base local"
+    r = cnsf / local
+    return f"+{(r - 1) * 100:,.0f}% sobre libros" if r < 3 else f"×{r:,.0f} sobre libros"
+
+
+def _fuerte_mm(v: float, fx: float) -> str:
+    """Un importe en negritas, en las dos monedas. `dual_texto` escaparía el <b>."""
+    return dual(f"<b>USD {v / 1e6:,.2f} MM</b>", f"<b>MXN {v * fx / 1e6:,.2f} MM</b>")
+
+
+def _mide(texto: str, px: float) -> float:
+    """Ancho aproximado de un texto, para no encimar etiquetas en el SVG."""
+    return len(texto) * px * 0.58
+
+
+def _escala_bonita(tope: float, pasos: int = 4) -> "list[float]":
+    """Marcas de eje en números redondos, de cero al tope."""
+    if tope <= 0:
+        return [0.0]
+    paso = _paso_bonito(tope / pasos)
+    marcas, v = [], 0.0
+    while v < tope + paso * 0.5:
+        marcas.append(round(v, 6))
+        v += paso
+    return marcas
+
+
+def _svg_mancuernas(hist: Historico, periodos: "Sequence[str]", fx: float) -> str:
+    """Libros contra estatutario, corte por corte. El trazo que une es la brecha.
+
+    Es el gráfico central de la página: en una sola lectura se ve cuánto hay
+    constituido, cuánto pediría el método estatutario y qué tan lejos están.
+    """
+    ps = [p for p in periodos if hist.completo(p)]
+    if not ps:
+        return '<p class="nota-graf">Ningún corte tiene las dos fuentes cargadas.</p>'
+
+    filas = [(p, hist.total(p, "local") / 1e6, hist.total(p, "cnsf") / 1e6) for p in ps]
+    tope = max(c for _p, _l, c in filas) * 1.12
+    marcas = _escala_bonita(tope)
+    tope = max(tope, marcas[-1])
+
+    L, R, T, B, alto_fila = 128, 116, 30, 46, 58
+    W = 880
+    H = T + B + alto_fila * len(filas)
+    x = lambda v: L + (W - L - R) * (v / tope)          # noqa: E731
+
+    o = [f'<svg class="gd" viewBox="0 0 {W} {H}" role="img" '
+         f'aria-label="Reserva en libros contra reserva bajo método estatutario, '
+         f'por corte">']
+    # rejilla: hairline sólida, un paso por debajo del fondo
+    for m in marcas:
+        o.append(f'<line x1="{x(m):.1f}" y1="{T - 8}" x2="{x(m):.1f}" y2="{H - B + 4}" '
+                 f'stroke="{LINE_SOFT}" stroke-width="1" />')
+        o.append(f'<text x="{x(m):.1f}" y="{H - B + 22}" text-anchor="middle" '
+                 f'fill="{INK_3}" font-family="{MONO_CSS}" font-size="13">{m:,.0f}</text>')
+
+    for i, (p, loc, cn) in enumerate(filas):
+        y = T + alto_fila * i + alto_fila / 2
+        xl, xc = x(loc), x(cn)
+        o.append(f'<text x="{L - 16}" y="{y + 5}" text-anchor="end" fill="{INK}" '
+                 f'font-family="{UI_CSS}" font-size="15" '
+                 f'font-weight="{600 if i == len(filas) - 1 else 400}">'
+                 f'{esc(etiqueta_corta(p))}</text>')
+        # el trazo que une: la brecha, que es de lo que trata la página
+        o.append(f'<line x1="{xl:.1f}" y1="{y:.1f}" x2="{xc:.1f}" y2="{y:.1f}" '
+                 f'stroke="{DIR_BRECHA}" stroke-width="9" stroke-linecap="round" />')
+        # los dos extremos, con anillo del color del papel para que no se peguen
+        for xx, col in ((xl, DIR_LOCAL), (xc, DIR_CNSF)):
+            o.append(f'<circle cx="{xx:.1f}" cy="{y:.1f}" r="6.5" fill="{col}" '
+                     f'stroke="{PAPER}" stroke-width="2" />')
+        # la brecha, escrita: dentro del trazo si cabe; si no, después del punto
+        for cls, val in (("v-usd", cn - loc), ("v-mxn", (cn - loc) * fx)):
+            etq = f"{val:,.2f}"
+            if _mide(etq, 14) + 18 < xc - xl:
+                o.append(f'<text class="{cls}" x="{(xl + xc) / 2:.1f}" y="{y - 14:.1f}" '
+                         f'text-anchor="middle" fill="{INK_2}" font-family="{MONO_CSS}" '
+                         f'font-size="14" font-weight="600">{etq}</text>')
+            else:
+                o.append(f'<text class="{cls}" x="{xc + 12:.1f}" y="{y + 5:.1f}" '
+                         f'fill="{INK_2}" font-family="{MONO_CSS}" font-size="14" '
+                         f'font-weight="600">{etq}</text>')
+    o.append("</svg>")
+    return "\n".join(o)
+
+
+def _svg_trayectoria(hist: Historico, periodos: "Sequence[str]", fx: float) -> str:
+    """Cómo se ha movido la brecha, corte a corte. Una sola serie, un solo color."""
+    ps = [p for p in periodos if hist.completo(p)]
+    if len(ps) < 2:
+        return ('<p class="nota-graf">Hacen falta al menos dos cortes completos '
+                'para dibujar la trayectoria.</p>')
+    vals = [(hist.diferencia(p) or 0.0) / 1e6 for p in ps]
+    marcas = _escala_bonita(max(vals) * 1.25)
+    tope = marcas[-1] or 1.0
+
+    L, R, T, B = 64, 74, 44, 52
+    W, H = 880, 300
+    px = lambda i: L + (W - L - R) * (i / max(1, len(ps) - 1))     # noqa: E731
+    py = lambda v: H - B - (H - T - B) * (v / tope)                # noqa: E731
+
+    o = [f'<svg class="gd" viewBox="0 0 {W} {H}" role="img" '
+         f'aria-label="Evolución de la brecha entre metodologías">']
+    for m in marcas:
+        o.append(f'<line x1="{L}" y1="{py(m):.1f}" x2="{W - R}" y2="{py(m):.1f}" '
+                 f'stroke="{LINE_SOFT}" stroke-width="1" />')
+        o.append(f'<text x="{L - 12}" y="{py(m) + 4:.1f}" text-anchor="end" '
+                 f'fill="{INK_3}" font-family="{MONO_CSS}" font-size="13">{m:,.1f}</text>')
+
+    pts = [(px(i), py(v)) for i, v in enumerate(vals)]
+    area = (f'M {pts[0][0]:.1f} {py(0):.1f} '
+            + " ".join(f"L {a:.1f} {b:.1f}" for a, b in pts)
+            + f' L {pts[-1][0]:.1f} {py(0):.1f} Z')
+    o.append(f'<path d="{area}" fill="{PLUM}" fill-opacity="0.10" />')
+    o.append('<path d="' + " ".join(
+        ("M " if k == 0 else "L ") + f"{a:.1f} {b:.1f}" for k, (a, b) in enumerate(pts))
+        + f'" fill="none" stroke="{PLUM}" stroke-width="2" '
+        'stroke-linejoin="round" stroke-linecap="round" />')
+
+    for i, (a, b) in enumerate(pts):
+        o.append(f'<circle cx="{a:.1f}" cy="{b:.1f}" r="4.5" fill="{PLUM}" '
+                 f'stroke="{PAPER}" stroke-width="2" />')
+        o.append(f'<text x="{a:.1f}" y="{H - B + 24}" text-anchor="middle" '
+                 f'fill="{INK_3}" font-family="{UI_CSS}" font-size="13">'
+                 f'{esc(etiqueta_cascada(ps[i]))}</text>')
+    # sólo los extremos llevan cifra: un número en cada punto no se lee
+    for i in (0, len(pts) - 1):
+        a, b = pts[i]
+        for cls, k in (("v-usd", 1.0), ("v-mxn", fx)):
+            etq = f"{vals[i] * k:,.2f}"
+            o.append(f'<text class="{cls}" x="{a:.1f}" y="{b - 15:.1f}" '
+                     f'text-anchor="{"start" if i == 0 else "end"}" fill="{INK}" '
+                     f'font-family="{MONO_CSS}" font-size="15" '
+                     f'font-weight="600">{etq}</text>')
+    o.append("</svg>")
+    return "\n".join(o)
+
+
+def _svg_por_reserva(hist: Historico, periodo: str, fx: float) -> str:
+    """De dónde sale la brecha: una barra por reserva, de mayor a menor."""
+    filas = []
+    for c in CONCEPTOS:
+        loc = hist.datos[periodo]["local"].get(c.id)
+        cn = hist.datos[periodo]["cnsf"].get(c.id)
+        if loc is None or cn is None:
+            continue
+        filas.append((c, (cn - loc) / 1e6, loc / 1e6, cn / 1e6))
+    if not filas:
+        return '<p class="nota-graf">Este corte no tiene las dos fuentes cargadas.</p>'
+    filas.sort(key=lambda f: -abs(f[1]))
+    tope = max(max(abs(f[1]) for f in filas) * 1.35, 0.01)
+
+    L, R, T, B, alto = 214, 130, 14, 16, 52
+    W = 880
+    H = T + B + alto * len(filas)
+    x = lambda v: L + (W - L - R) * (v / tope)      # noqa: E731
+
+    o = [f'<svg class="gd" viewBox="0 0 {W} {H}" role="img" '
+         f'aria-label="Brecha por reserva al {esc(etiqueta_periodo(periodo))}">']
+    o.append(f'<line x1="{L}" y1="{T - 2}" x2="{L}" y2="{H - B + 2}" '
+             f'stroke="{LINE}" stroke-width="1" />')
+    for i, (c, dif, loc, cn) in enumerate(filas):
+        y = T + alto * i
+        o.append(f'<text x="{L - 16}" y="{y + 20}" text-anchor="end" fill="{INK}" '
+                 f'font-family="{UI_CSS}" font-size="15">'
+                 f'{esc(c.label.replace("Reserva de ", ""))}</text>')
+        veces = _proporcion(loc * 1e6, cn * 1e6)
+        o.append(f'<text x="{L - 16}" y="{y + 37}" text-anchor="end" fill="{INK_3}" '
+                 f'font-family="{UI_CSS}" font-size="12.5">{esc(veces)}</text>')
+        ancho = max(0.0, x(abs(dif)) - L)
+        if ancho < 1.5:
+            o.append(f'<line x1="{L}" y1="{y + 22}" x2="{L + 26}" y2="{y + 22}" '
+                     f'stroke="{LINE}" stroke-width="2" stroke-dasharray="2 3" />')
+        else:
+            # extremo redondeado del lado del dato, escuadra sobre la línea base
+            o.append(f'<path d="M {L} {y + 11} h {ancho - 4:.1f} a 4 4 0 0 1 4 4 '
+                     f'v 14 a 4 4 0 0 1 -4 4 H {L} Z" fill="{PLUM}" />')
+        for cls, k in (("v-usd", 1.0), ("v-mxn", fx)):
+            o.append(f'<text class="{cls}" x="{L + max(ancho, 26) + 14:.1f}" '
+                     f'y="{y + 27}" fill="{INK}" font-family="{MONO_CSS}" '
+                     f'font-size="15" font-weight="600">{dif * k:,.2f}</text>')
+    o.append("</svg>")
+    return "\n".join(o)
+
+
+CSS_DIR = """
+:root{
+  --plum:%(plum)s; --plum-deep:%(plum_deep)s; --lila:%(lila)s; --lila2:%(lila2)s;
+  --lila3:%(lila3)s; --paper:%(paper)s; --ground:%(ground)s; --ice:%(ice)s;
+  --ink:%(ink)s; --ink2:%(ink2)s; --ink3:%(ink3)s;
+  --line:%(line)s; --line-soft:%(line_soft)s;
+  --sans:%(ui)s; --mono:%(mono)s;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--ink);font-family:var(--sans);
+     font-size:17px;line-height:1.55;-webkit-font-smoothing:antialiased}
+.hoja{max-width:1000px;margin:0 auto;background:var(--paper);
+      box-shadow:0 1px 2px rgba(20,14,24,.06),0 14px 44px rgba(20,14,24,.09)}
+h1,h2,h3{margin:0;font-weight:700;letter-spacing:-.01em}
+p{margin:0}
+
+/* ---- 1. el veredicto ---- */
+.hero{background:var(--plum);color:#fff;padding:44px 54px 40px}
+.hero .ceja{font-size:13.5px;letter-spacing:.14em;text-transform:uppercase;
+            color:#E6CFDE;font-weight:600}
+.hero h1{font-size:25px;margin-top:6px;color:#fff;font-weight:600;max-width:34ch;
+         line-height:1.25}
+.cifra{display:flex;align-items:baseline;gap:14px;margin-top:22px}
+.cifra .n{font-size:76px;font-weight:700;line-height:.95;letter-spacing:-.035em}
+.cifra .u{font-size:22px;color:#E6CFDE;font-weight:600}
+.lead{margin-top:12px;font-size:19px;color:#F2E2EC;max-width:56ch;line-height:1.45}
+.apoyos{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:0;margin-top:30px;
+        border-top:1px solid rgba(255,255,255,.22);padding-top:20px}
+.apoyo{padding:0 28px;border-right:1px solid rgba(255,255,255,.22);min-width:0}
+.apoyo:first-child{padding-left:0}
+.apoyo:last-child{border-right:0;padding-right:0}
+@media (max-width:700px){.apoyos{grid-template-columns:1fr;gap:18px}
+  .apoyo{padding:0;border-right:0}}
+.apoyo .k{font-size:12.5px;letter-spacing:.11em;text-transform:uppercase;color:#D9BCCE}
+.apoyo .v{font-size:31px;font-weight:700;margin-top:2px;letter-spacing:-.02em}
+.apoyo .s{font-size:13.5px;color:#D9BCCE;font-family:var(--mono)}
+
+/* ---- barra de controles ---- */
+.mandos{display:flex;flex-wrap:wrap;align-items:center;gap:18px;
+        padding:14px 54px;background:var(--ice);border-bottom:1px solid var(--line)}
+.switch{display:inline-flex;border:1px solid var(--line);border-radius:6px;
+        overflow:hidden;background:var(--paper)}
+.switch label{padding:6px 18px;font-size:14.5px;font-weight:600;color:var(--ink2);
+              cursor:pointer;user-select:none;border-right:1px solid var(--line)}
+.switch label:last-child{border-right:0}
+#m-usd:checked ~ .hoja label[for=m-usd],
+#m-mxn:checked ~ .hoja label[for=m-mxn]{background:var(--lila);color:#fff}
+.mandos .fx{font-family:var(--mono);font-size:13.5px;color:var(--ink3)}
+input.sw{position:absolute;width:0;height:0;opacity:0;pointer-events:none}
+.v-mxn{display:none}
+#m-mxn:checked ~ .hoja .v-usd{display:none}
+#m-mxn:checked ~ .hoja .v-mxn{display:inline}
+#m-mxn:checked ~ .hoja text.v-mxn{display:inline}
+
+/* ---- secciones ---- */
+.sec{padding:38px 54px;border-top:1px solid var(--line-soft)}
+.sec:first-of-type{border-top:0}
+.num{font-family:var(--mono);font-size:13px;color:var(--lila2);font-weight:700}
+.sec h2{font-size:26px;margin-top:4px;color:var(--plum);max-width:40ch;line-height:1.2}
+.sub{font-size:16.5px;color:var(--ink2);margin-top:8px;max-width:72ch}
+.lienzo{margin-top:22px;overflow-x:auto}
+svg.gd{width:100%%;height:auto;display:block;min-width:660px}
+.nota-graf{font-family:var(--mono);font-size:14px;color:var(--ink3);padding:18px 0}
+.unidad{font-family:var(--mono);font-size:13.5px;color:var(--ink3);margin-top:8px}
+.leyenda{display:flex;flex-wrap:wrap;gap:22px;margin-top:16px;align-items:center}
+.chip{display:inline-flex;align-items:center;gap:8px;font-size:14.5px;color:var(--ink2)}
+.chip i{width:13px;height:13px;border-radius:50%%;display:inline-block;
+        box-shadow:0 0 0 2px var(--paper)}
+.chip i.trazo{width:22px;height:9px;border-radius:5px}
+.dice{margin-top:20px;font-size:17.5px;color:var(--ink);max-width:74ch;
+      border-left:3px solid var(--lila3);padding-left:16px}
+.dice b{color:var(--plum);font-weight:700}
+
+/* ---- tabla de respaldo ---- */
+table.res{border-collapse:collapse;width:100%%;margin-top:18px;
+          font-variant-numeric:tabular-nums}
+table.res th,table.res td{padding:9px 12px;font-size:14.5px;text-align:right;
+                          border-bottom:1px solid var(--line-soft)}
+table.res thead th{background:var(--ice);color:var(--plum);font-size:12.5px;
+                   letter-spacing:.06em;text-transform:uppercase;text-align:right}
+table.res thead th:first-child,table.res tbody th{text-align:left;font-weight:500}
+table.res tbody th{color:var(--ink)}
+table.res td{font-family:var(--mono);color:var(--ink2)}
+table.res td.fuerte{color:var(--plum);font-weight:700}
+table.res tr.corte th{background:var(--paper);color:var(--plum);font-weight:700;
+                      font-size:15px;padding-top:16px;border-bottom:2px solid var(--lila3)}
+table.res tr.tot th,table.res tr.tot td{font-weight:700;color:var(--ink);
+                                        border-bottom:2px solid var(--line)}
+.aviso{background:#FBF4E6;border-left:4px solid %(warn)s;border-radius:0 5px 5px 0;
+       padding:13px 16px;font-size:15.5px;color:#6B4A0A;margin-top:18px}
+.nota{background:var(--ice);border-left:3px solid var(--lila3);border-radius:0 5px 5px 0;
+      padding:16px 18px;font-size:17px;margin-top:6px}
+.pie{padding:24px 54px 34px;background:var(--ice);border-top:1px solid var(--line);
+     font-size:13.5px;color:var(--ink3);font-family:var(--mono);line-height:1.7}
+.pie b{color:var(--ink2);font-weight:600}
+
+@media (max-width:760px){
+  .hero,.sec,.mandos,.pie{padding-left:24px;padding-right:24px}
+  .cifra .n{font-size:54px}
+  .apoyo{padding-right:22px;margin-right:22px}
+}
+@media print{
+  body{background:#fff}
+  .hoja{box-shadow:none;max-width:none}
+  .mandos{display:none}
+  .hero{background:#fff;color:var(--ink);border-bottom:3px solid var(--plum)}
+  .hero .ceja{color:var(--lila2)}
+  .hero h1,.cifra .n{color:var(--plum)}
+  .lead,.apoyo .k,.apoyo .s,.cifra .u{color:var(--ink2)}
+  .apoyos,.apoyo{border-color:var(--line)}
+  .sec{page-break-inside:avoid}
+}
+""" % {
+    "plum": PLUM, "plum_deep": PLUM_DEEP, "lila": LILA, "lila2": LILA_2,
+    "lila3": LILA_3, "paper": PAPER, "ground": GROUND, "ice": ICE_2,
+    "ink": INK, "ink2": INK_2, "ink3": INK_3,
+    "line": LINE, "line_soft": LINE_SOFT, "warn": WARN,
+    "ui": UI_CSS, "mono": MONO_CSS,
+}
+
+
+def _tabla_respaldo(hist: Historico, periodos: "Sequence[str]", fx: float) -> str:
+    """Las mismas cifras, completas. Ningún dato vive sólo dentro de un gráfico."""
+    filas = ""
+    for p in periodos:
+        e = hist.datos[p]
+        filas += (f'<tr class="corte"><th colspan="5">{esc(etiqueta_periodo(p))}</th></tr>')
+        for c in CONCEPTOS:
+            loc, cn = e["local"].get(c.id), e["cnsf"].get(c.id)
+            dif = None if loc is None or cn is None else cn - loc
+            veces = ("—" if dif is None or not loc
+                     else ("igual" if abs(dif) < 5000 else f"×{cn / loc:,.1f}"))
+            filas += (f"<tr><th>{esc(c.label)}</th>"
+                      f"<td>{dual_mm(loc, fx)}</td><td>{dual_mm(cn, fx)}</td>"
+                      f'<td class="fuerte">{dual_mm(dif, fx)}</td>'
+                      f"<td>{esc(veces)}</td></tr>")
+        tl, tc = hist.total(p, "local"), hist.total(p, "cnsf")
+        dif = hist.diferencia(p)
+        veces = ("—" if dif is None or not tl else f"×{tc / tl:,.2f}")
+        filas += (f'<tr class="tot"><th>Total reservas</th>'
+                  f"<td>{dual_mm(tl, fx)}</td><td>{dual_mm(tc, fx)}</td>"
+                  f'<td class="fuerte">{dual_mm(dif, fx)}</td>'
+                  f"<td>{esc(veces)}</td></tr>")
+    return (f'<table class="res"><thead><tr><th>Reserva</th>'
+            f"<th>Metodología local</th><th>Método Estatutario CNSF</th>"
+            f"<th>Brecha</th><th>Proporción</th></tr></thead>"
+            f"<tbody>{filas}</tbody></table>")
+
+
+def construir_html_direccion(hist: Historico, periodos: "Sequence[str] | None" = None,
+                             fx: float = FX_DEFAULT,
+                             nota: str = NOTA_RELEVANTE) -> str:
+    """La página de una hoja para dirección: la brecha entre las dos metodologías.
+
+    No es el tablero operativo con otro color: es otro documento, con otra
+    pregunta. El tablero sirve para revisar cifras; esto sirve para decidir si
+    hay que reconocer algo en los estados financieros, y por eso lleva una sola
+    cifra arriba, la brecha contra la base sobre la que se mide, y la tabla
+    completa al pie para que nada quede sólo dentro de un gráfico.
+    """
+    ps = [p for p in (list(periodos) if periodos else hist.periodos())]
+    completos = [p for p in ps if hist.completo(p)]
+    if not completos:
+        raise ValueError("Ningún corte tiene las dos fuentes cargadas: no hay brecha "
+                         "que presentar.")
+    act = completos[-1]
+    prev = completos[-2] if len(completos) > 1 else None
+    ancla = hist.fx(act, fx)
+
+    loc, cn = hist.total(act, "local"), hist.total(act, "cnsf")
+    brecha = cn - loc
+    sobre = brecha / loc * 100 if loc else 0.0
+
+    # --- 1. el veredicto ---------------------------------------------------
+    apoyos = [
+        ("En libros · metodología local", loc,
+         "lo constituido y registrado al corte"),
+        ("Método Estatutario CNSF", cn,
+         "lo que pediría constituir la norma"),
+    ]
+    html_apoyos = "".join(
+        f'<div class="apoyo"><div class="k">{esc(k)}</div>'
+        f'<div class="v">{dual_texto("{sim} {n}", v, ancla)}</div>'
+        f'<div class="s">MM · {esc(s)}</div></div>' for k, v, s in apoyos)
+    html_apoyos += (f'<div class="apoyo"><div class="k">Sobre la base en libros</div>'
+                    f'<div class="v">{sobre:,.1f}%</div>'
+                    f'<div class="s">de constitución adicional</div></div>')
+
+    if prev:
+        d0 = hist.diferencia(prev) or 0.0
+        v = brecha - d0
+        pct = f'{"+" if v >= 0 else "−"}{abs(v / d0 * 100):.1f}%' if d0 else "n/d"
+        movio = (f'La brecha {"creció" if v >= 0 else "se redujo"} '
+                 f'{dual_texto("{sim} {n} MM", abs(v), ancla)} ({esc(pct)}) '
+                 f'desde {esc(etiqueta_corta(prev).lower())}.')
+    else:
+        movio = ("Es el primer corte completo del histórico: todavía no hay "
+                 "contra qué comparar la evolución.")
+
+    # --- 3. lo que dice cada sección --------------------------------------
+    mayor = max(
+        ((c, (hist.datos[act]["cnsf"].get(c.id, 0.0)
+              - hist.datos[act]["local"].get(c.id, 0.0))) for c in CONCEPTOS),
+        key=lambda t: abs(t[1]))
+    parte = abs(mayor[1]) / abs(brecha) * 100 if brecha else 0.0
+    iguales = [c.label for c in CONCEPTOS
+               if c.id in hist.datos[act]["local"] and c.id in hist.datos[act]["cnsf"]
+               and abs(hist.datos[act]["cnsf"][c.id]
+                       - hist.datos[act]["local"][c.id]) < 5000]
+    dice_reserva = (f'<b>{esc(mayor[0].label)}</b> explica '
+                    f'{parte:,.0f}% de la brecha.')
+    if iguales:
+        dice_reserva += (" En " + esc(", ".join(x.lower() for x in iguales))
+                         + (" las dos metodologías coinciden."
+                            if len(iguales) > 1 else " las dos metodologías coinciden."))
+
+    if len(completos) > 1:
+        d_ini = hist.diferencia(completos[0]) or 0.0
+        tot = brecha - d_ini
+        pct_t = f'{"+" if tot >= 0 else "−"}{abs(tot / d_ini * 100):.0f}%' if d_ini else "n/d"
+        dice_trayectoria = (
+            f"En los {len(completos)} cortes cargados la brecha pasó de "
+            f"{_fuerte_mm(d_ini, ancla)} en {esc(etiqueta_corta(completos[0]).lower())} a "
+            f"{_fuerte_mm(brecha, ancla)} en {esc(etiqueta_corta(act).lower())}: "
+            f"{esc(pct_t)}. {movio}")
+    else:
+        dice_trayectoria = movio
+
+    avisos = [p for p in ps if hist.datos.get(p, {}).get("aviso")]
+    html_aviso = ("" if not avisos else
+                  '<div class="aviso"><b>Revisar la metodología local.</b> '
+                  + esc("; ".join(f"{etiqueta_corta(p)}: {hist.datos[p]['aviso']}"
+                                  for p in avisos)) + "</div>")
+    incompletos = [p for p in ps if p not in completos]
+    html_incompletos = ("" if not incompletos else
+                        '<div class="aviso">Fuera de esta página por tener una sola '
+                        'fuente cargada: ' + esc(", ".join(etiqueta_corta(p)
+                                                           for p in incompletos)) + ".</div>")
+
+    orig = hist.datos[act].get("origen", {})
+    fuentes = " · ".join(x for x in (orig.get("local"), orig.get("cnsf")) if x) or "n/d"
+    sello = dt.datetime.now().strftime("%d/%m/%Y %H:%M")
+
+    return f"""<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Brecha de constitución · Reservas técnicas QES · {esc(etiqueta_corta(act))}</title>
+<style>{CSS_DIR}</style>
+</head>
+<body>
+<input type="radio" name="moneda" id="m-usd" class="sw" checked />
+<input type="radio" name="moneda" id="m-mxn" class="sw" />
+<div class="hoja">
+
+  <header class="hero">
+    <p class="ceja">Reservas técnicas QES · {esc(etiqueta_periodo(act))}</p>
+    <h1>Brecha entre el Método Estatutario CNSF y la Metodología local</h1>
+    <div class="cifra">
+      <span class="n">{dual_texto("{sim} {n}", brecha, ancla)}</span>
+      <span class="u">millones</span>
+    </div>
+    <p class="lead">Es lo que el método estatutario exigiría constituir por encima
+       de lo que hoy está en libros: {sobre:,.1f}% más sobre la misma cartera.
+       {movio}</p>
+    <div class="apoyos">{html_apoyos}</div>
+  </header>
+
+  <div class="mandos">
+    <div class="switch" role="group" aria-label="Moneda">
+      <label for="m-usd">Dólares</label><label for="m-mxn">Pesos</label>
+    </div>
+    <span class="fx">Tipo de cambio Banco de México al cierre de
+      {esc(etiqueta_corta(act).lower())}: {ancla:,.4f} MXN/USD · convierte toda la hoja</span>
+  </div>
+
+  <section class="sec">
+    <p class="num">01</p>
+    <h2>Cuánto hay constituido y cuánto pediría el estatutario</h2>
+    <p class="sub">Cada renglón es un corte. El punto claro es lo registrado con la
+       metodología local; el oscuro, lo que resultaría del Método Estatutario CNSF.
+       El trazo que los une <em>es</em> la brecha.</p>
+    <div class="lienzo">{_svg_mancuernas(hist, completos, ancla)}</div>
+    <p class="unidad">{dual("Millones de USD", "Millones de MXN")}</p>
+    <div class="leyenda">
+      <span class="chip"><i style="background:{DIR_LOCAL}"></i>Metodología local (en libros)</span>
+      <span class="chip"><i style="background:{DIR_CNSF}"></i>Método Estatutario CNSF</span>
+      <span class="chip"><i class="trazo" style="background:{DIR_BRECHA}"></i>Brecha</span>
+    </div>
+    <p class="dice">Al {esc(etiqueta_periodo(act))} la reserva registrada asciende a
+       {_fuerte_mm(loc, ancla)} y el método estatutario la llevaría a
+       {_fuerte_mm(cn, ancla)}.</p>
+  </section>
+
+  <section class="sec">
+    <p class="num">02</p>
+    <h2>Cómo se ha movido la brecha</h2>
+    <p class="sub">La diferencia total entre las dos metodologías, corte a corte.
+       La escala arranca en cero: la altura del área es la brecha, no una porción
+       de ella.</p>
+    <div class="lienzo">{_svg_trayectoria(hist, completos, ancla)}</div>
+    <p class="unidad">{dual("Millones de USD", "Millones de MXN")}</p>
+    <p class="dice">{dice_trayectoria}</p>
+  </section>
+
+  <section class="sec">
+    <p class="num">03</p>
+    <h2>De dónde sale</h2>
+    <p class="sub">Brecha por reserva al {esc(etiqueta_periodo(act))}, de mayor a
+       menor. Debajo de cada nombre, cuántas veces la reserva estatutaria supera a
+       la registrada en libros.</p>
+    <div class="lienzo">{_svg_por_reserva(hist, act, ancla)}</div>
+    <p class="unidad">{dual("Millones de USD", "Millones de MXN")}</p>
+    <p class="dice">{dice_reserva}</p>
+  </section>
+
+  <section class="sec">
+    <p class="num">04</p>
+    <h2>Qué hay que decidir</h2>
+    <div class="nota">{esc(nota)}</div>
+    {html_aviso}{html_incompletos}
+    <p class="sub" style="margin-top:26px">Las cifras completas, para quien quiera
+       revisarlas: nada de esta página vive sólo dentro de un gráfico.</p>
+    {_tabla_respaldo(hist, completos, ancla)}
+  </section>
+
+  <footer class="pie">
+    <b>Brecha</b> = Método Estatutario CNSF − Metodología local, es decir el exceso
+    de constitución que resultaría de aplicar el método estatutario.<br />
+    <b>Cortes</b>: {esc(", ".join(etiqueta_corta(p) for p in completos))} ·
+    <b>Fuentes del último corte</b>: {esc(fuentes)}<br />
+    {esc(NOTA_PIE)}<br />
+    Armado en local el {sello}. El archivo se basta solo: no consulta nada al abrirse.
+  </footer>
+</div>
+</body>
+</html>
+"""
+
+
+def escribir_direccion(hist: Historico, destino: "str | Path | None" = None,
+                       periodos: "Sequence[str] | None" = None,
+                       fx: float = FX_DEFAULT, nota: str = NOTA_RELEVANTE,
+                       abrir: bool = True) -> Path:
+    """Escribe la página de dirección junto al notebook y la abre."""
+    ps = list(periodos) if periodos else hist.periodos()
+    ruta = Path(destino) if destino else Path(hist.ruta).parent / "brecha_direccion.html"
+    ruta.write_text(construir_html_direccion(hist, ps, fx, nota), encoding="utf-8")
+    if abrir:
+        try:
+            webbrowser.open_new_tab(ruta.resolve().as_uri())
+        except Exception:
+            pass
+    return ruta
+
+
+# -----------------------------------------------------------------------------
 # 8. La ventana
 # -----------------------------------------------------------------------------
 
@@ -2928,13 +3575,15 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
     GRAFICOS = {"Cascada encadenada (por reserva)": "cascada",
                 "Columnas por corte": "evolucion"}
     graf_var = tk.StringVar(value=list(GRAFICOS)[0])
-    ttk.Combobox(ctl, textvariable=graf_var, state="readonly", width=32,
-                 values=list(GRAFICOS)).pack(side="left", padx=(8, 16))
+    ttk.Combobox(ctl, textvariable=graf_var, state="readonly", width=28,
+                 values=list(GRAFICOS)).pack(side="left", padx=(8, 12))
     btn_procesar = ttk.Button(ctl, text="Procesar")
     btn_procesar.pack(side="right")
+    btn_dir = ttk.Button(ctl, text="Vista dirección")
+    btn_dir.pack(side="right", padx=(0, 6))
     btn_evol = ttk.Button(ctl, text="Ver evolución")
     btn_evol.pack(side="right", padx=(0, 6))
-    ttk.Button(ctl, text="Vaciar histórico local",
+    ttk.Button(ctl, text="Vaciar histórico",
                command=lambda: vaciar()).pack(side="right", padx=(0, 6))
 
     # ------------------------------------------------------------ 5. bitácora
@@ -3424,16 +4073,17 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
                 continue
             hist.poner_fx(per, v)
 
-    def token_actual() -> str:
-        """El token escrito en la ventana; si es nuevo, se guarda para la próxima."""
+    def tokens_actuales() -> "list[str]":
+        """Los tokens a usar; si el de la ventana es nuevo, se guarda primero."""
         tok = token_var.get().strip()
-        guardado = token_banxico()
-        if tok and tok != guardado:
+        if tok and tok != token_banxico():
             try:
                 apunta(f"· token del SIE guardado en {guardar_token_banxico(tok)}")
             except OSError as err:
                 apunta(f"! no se pudo guardar el token: {err}", "warn")
-        return tok or guardado
+        toks = tokens_banxico()
+        # si no se pudo escribir el archivo, el tecleado igual se usa esta vez
+        return toks if tok in toks else ([tok] + toks if tok else toks)
 
     def trae_tc(periodos: "Sequence[str] | None" = None, auto: bool = False) -> None:
         """Le pide a Banxico el tipo de cambio de los cortes que no lo tienen.
@@ -3449,7 +4099,7 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
             apunta("· no hay cortes en el histórico todavía: carga un archivo primero."
                    if not ps else "· todos los cortes ya traen tipo de cambio de cierre.")
             return
-        tok = token_actual()
+        tok = tokens_actuales()
         if not tok:
             if auto and estado["aviso_token"]:
                 return
@@ -3568,6 +4218,32 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
         apunta("· abierta en el navegador. El archivo es autocontenido: se puede mandar "
                "por correo tal cual.", "ok")
 
+    def direccion() -> None:
+        """La hoja de una página para dirección: la brecha entre metodologías."""
+        fx = tipo_de_cambio()
+        funde_pendientes()
+        guarda_fx()
+        trae_tc(auto=True)
+        hist.guardar()
+        h, ps = historico_de_la_vista()
+        # esta página va con TODOS los cortes completos que haya: es un documento
+        # de posición, no la vista de tres columnas
+        ps = [p for p in h.periodos() if h.completo(p)]
+        if not ps:
+            apunta("! ningún corte tiene las dos fuentes cargadas: sin las dos no hay "
+                   "brecha que presentar.", "err")
+            return
+        try:
+            ruta_html = escribir_direccion(h, periodos=ps, fx=fx, nota=estado["nota"])
+        except Exception as err:
+            apunta(f"! no se pudo armar la hoja de dirección: {err}", "err")
+            return
+        apunta(f"· hoja de dirección con {len(ps)} corte(s) escrita en {ruta_html}", "ok")
+        apunta(f"  brecha al {etiqueta_corta(ps[-1]).lower()}: "
+               f"{fmt(h.diferencia(ps[-1]) or 0.0)} USD")
+        apunta("  es un documento: se imprime, se proyecta y se manda por correo "
+               "tal cual; no cambia entre quien la abre y quien la recibe.")
+
     def evolucion() -> None:
         fx = tipo_de_cambio()
         funde_pendientes()
@@ -3602,6 +4278,7 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
 
     btn_procesar.configure(command=procesar)
     btn_evol.configure(command=evolucion)
+    btn_dir.configure(command=direccion)
     # el botón funde lo pendiente primero: si no, en frío no habría cortes que pedir
     btn_bmx.configure(command=lambda: (funde_pendientes(), guarda_fx(),
                                        hist.guardar(), trae_tc()))

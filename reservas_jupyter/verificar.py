@@ -26,6 +26,7 @@ Historico = BLOQUE["Historico"]
 construir_html = BLOQUE["construir_html"]
 escribir_vista = BLOQUE["escribir_vista"]
 etiqueta_corta = BLOQUE["etiqueta_corta"]
+etiqueta_periodo = BLOQUE["etiqueta_periodo"]
 
 # ---------------------------------------------------------------------------
 # Cifras de control (sección 05 del encargo), en USD
@@ -60,7 +61,7 @@ def igual(etiqueta, obtenido, esperado, tol):
     pruebas += 1
     if obtenido is None and esperado is None:
         return
-    if isinstance(esperado, str) or isinstance(obtenido, str):
+    if isinstance(esperado, (str, list)) or isinstance(obtenido, (str, list)):
         if obtenido != esperado:
             fallos.append(f"{etiqueta}: se obtuvo {obtenido!r}, se esperaba {esperado!r}")
         return
@@ -684,15 +685,49 @@ def main(argv):
         fallos.append("con la red caída inventó un tipo de cambio")
     igual("sin token no se pide nada", len(hb2.completar_fx("")), 1, 0)
 
-    # el token: la variable de entorno manda sobre el archivo
+    # varios tokens: el rechazado cede el turno al siguiente sin que se note
+    srv2 = _HS(("127.0.0.1", 0), _Falso)
+    _th.Thread(target=srv2.serve_forever, daemon=True).start()
+    BLOQUE["BANXICO_API"] = (f"http://127.0.0.1:{srv2.server_port}"
+                             "/series/{serie}/datos/{ini}/{fin}")
+    v_, _f = tc_banxico("2026-05-31", ["CADUCO", "TAMPOCO", "BUENO"])
+    igual("el token rechazado cede el turno al siguiente", v_, 18.3120, 1e-9)
+    pruebas += 1
+    try:
+        tc_banxico("2026-05-31", ["CADUCO", "TAMPOCO"])
+        fallos.append("con todos los tokens rechazados debería tronar")
+    except BanxicoError as err:
+        if "no es válido" not in str(err):
+            fallos.append(f"con todos rechazados se obtuvo {str(err)!r}")
+    # un error que NO es del token no se reintenta: sería gastar consultas
+    pruebas += 1
+    try:
+        tc_banxico("2026-05-31", ["BUENO", "BUENO2"], serie="VACIA")
+        fallos.append("la serie sin dato debería tronar")
+    except BanxicoError as err:
+        if err.rechazado:
+            fallos.append("la serie sin dato se marcó como token rechazado")
+    srv2.shutdown()
+
+    # el token: la variable de entorno manda sobre el archivo, y el bloque es el último
     ruta_tok = tmp / "tok.txt"
     BLOQUE["guardar_token_banxico"]("DEL-ARCHIVO", ruta_tok)
     os.environ.pop(BLOQUE["BANXICO_TOKEN_ENV"], None)
     igual("el token se lee del archivo", BLOQUE["token_banxico"](ruta_tok), "DEL-ARCHIVO", 0)
     os.environ[BLOQUE["BANXICO_TOKEN_ENV"]] = "DEL-ENTORNO"
     igual("y la variable de entorno manda", BLOQUE["token_banxico"](ruta_tok), "DEL-ENTORNO", 0)
+    igual("los tres quedan en la lista, en orden",
+          BLOQUE["tokens_banxico"](ruta_tok), ["DEL-ENTORNO", "DEL-ARCHIVO"], 0)
+    BLOQUE["TOKENS_BANXICO"] = ["DEL-BLOQUE", "DEL-ARCHIVO", ""]
+    igual("el del bloque va al final y no se repite",
+          BLOQUE["tokens_banxico"](ruta_tok),
+          ["DEL-ENTORNO", "DEL-ARCHIVO", "DEL-BLOQUE"], 0)
     os.environ.pop(BLOQUE["BANXICO_TOKEN_ENV"], None)
+    igual("sin entorno ni archivo queda el del bloque",
+          BLOQUE["token_banxico"](tmp / "no-existe.txt"), "DEL-BLOQUE", 0)
+    BLOQUE["TOKENS_BANXICO"] = []
     igual("sin nada, cadena vacía", BLOQUE["token_banxico"](tmp / "no-existe.txt"), "", 0)
+    igual("y lista vacía", BLOQUE["tokens_banxico"](tmp / "no-existe.txt"), [], 0)
 
     # los gráficos también traen las dos monedas
     pruebas += 1
@@ -712,6 +747,91 @@ def main(argv):
         pruebas += 1
         if viejo in ev2:
             fallos.append(f"la evolución sigue convirtiendo corte a corte: «{viejo}»")
+
+    # ---- 9. la hoja de dirección ----------------------------------------
+    # Es otro documento, no el tablero con otro color: una sola cifra heroica,
+    # la brecha contra la base sobre la que se mide, y la tabla completa al pie.
+    construir_direccion = BLOQUE["construir_html_direccion"]
+    doc_d = construir_direccion(h, h.periodos())
+
+    igual("una sola cifra heroica en la hoja", doc_d.count('<span class="n">'), 1, 0)
+    for cadena in ("Brecha entre el Método Estatutario CNSF y la Metodología local",
+                   'class="hero"', 'class="apoyos"', 'class="res"',
+                   "Banco de México al cierre de"):
+        pruebas += 1
+        if cadena not in doc_d:
+            fallos.append(f"a la hoja de dirección le falta «{cadena}»")
+    for prohibido in ("http://", "https://", "<link", " src=", "&lt;b&gt;"):
+        pruebas += 1
+        if prohibido in doc_d:
+            fallos.append(f"la hoja de dirección metió «{prohibido}»")
+    for cadena in ('id="m-mxn"', 'class="v-usd"', 'class="v-mxn"',
+                   'class="gd"', "@media print"):
+        pruebas += 1
+        if cadena not in doc_d:
+            fallos.append(f"la hoja de dirección no trae «{cadena}»")
+
+    # las cifras que dice son las del histórico, no otras
+    act_d = [p_ for p_ in h.periodos() if h.completo(p_)][-1]
+    fx_d = h.fx(act_d)
+    loc_d, cn_d = h.total(act_d, "local"), h.total(act_d, "cnsf")
+    for etq, v in (("brecha", cn_d - loc_d), ("en libros", loc_d), ("estatutario", cn_d)):
+        pruebas += 1
+        if f"USD {v / 1e6:,.2f}" not in doc_d:
+            fallos.append(f"la hoja de dirección no dice la cifra de {etq}: "
+                          f"USD {v / 1e6:,.2f}")
+        pruebas += 1
+        if f"MXN {v * fx_d / 1e6:,.2f}" not in doc_d:
+            fallos.append(f"la hoja de dirección no trae en pesos la cifra de {etq}")
+    pruebas += 1
+    if f"{(cn_d - loc_d) / loc_d * 100:,.1f}%" not in doc_d:
+        fallos.append("la hoja de dirección no dice el % sobre la base en libros")
+
+    # la tabla de respaldo lleva TODOS los cortes completos y sus tres reservas:
+    # nada de la página puede vivir sólo dentro de un gráfico
+    completos_d = [p_ for p_ in h.periodos() if h.completo(p_)]
+    for p_ in completos_d:
+        pruebas += 1
+        if etiqueta_periodo(p_) not in doc_d:
+            fallos.append(f"la tabla de respaldo no trae {p_}")
+    igual("renglones de total en la tabla", doc_d.count('class="tot"'), len(completos_d), 0)
+    igual("una fila de encabezado por corte", doc_d.count('class="corte"'), len(completos_d), 0)
+
+    # un corte a medias no entra al dibujo, y se dice
+    h_medias = Historico(tmp / "medias.json")
+    h_medias.datos = {k: _json.loads(_json.dumps(v)) for k, v in h.datos.items()}
+    h_medias.datos["2025-07-31"]["cnsf"] = {}
+    doc_m = construir_direccion(h_medias, h_medias.periodos())
+    pruebas += 1
+    if "Fuera de esta página por tener una sola fuente" not in doc_m:
+        fallos.append("un corte a medias no se avisa en la hoja de dirección")
+    pruebas += 1
+    if etiqueta_periodo("2025-07-31") in doc_m:
+        fallos.append("un corte a medias se coló en la hoja de dirección")
+
+    # sin ningún corte completo no se dibuja una hoja vacía: se dice
+    h_vacio = Historico(tmp / "vacio.json")
+    h_vacio.datos = {"2026-06-30": {"periodo": "2026-06-30", "local": {}, "cnsf": {},
+                                    "origen": {}}}
+    pruebas += 1
+    try:
+        construir_direccion(h_vacio)
+        fallos.append("sin cortes completos la hoja de dirección debería negarse")
+    except ValueError:
+        pass
+
+    # la proporción se dice como se entiende: en % abajo de tres veces, en veces arriba
+    prop = BLOQUE["_proporcion"]
+    igual("proporción chica en por ciento", prop(9_084_601.70, 12_799_633.26),
+          "+41% sobre libros", 0)
+    igual("proporción grande en veces", prop(7_461.06, 809_405.38), "×108 sobre libros", 0)
+    igual("sin diferencia lo dice", prop(2_773_742.22, 2_773_742.22), "coinciden", 0)
+    igual("sin base local lo dice", prop(0.0, 500_000.0), "sin base local", 0)
+
+    ruta_d = BLOQUE["escribir_direccion"](h, destino=tmp / "dir.html", abrir=False)
+    pruebas += 1
+    if not ruta_d.exists() or ruta_d.stat().st_size < 10_000:
+        fallos.append("escribir_direccion no dejó la hoja en disco")
 
     print(f"{pruebas} comprobaciones · {len(fallos)} fallo(s)")
     if fallos:

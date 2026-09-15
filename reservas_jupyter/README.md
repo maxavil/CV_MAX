@@ -31,7 +31,8 @@ reservas_jupyter/
    tecléalo. Si quieres más columnas, marca los cortes adicionales de abajo.
 6. Pica **Procesar**. Se escribe `vista_reservas_AAAA-MM-DD.html` junto al
    notebook y se abre en el navegador. **Ver evolución** escribe
-   `evolucion_diferencia.html` con la diferencia mes con mes.
+   `evolucion_diferencia.html` con la diferencia mes con mes, y **Vista dirección**
+   escribe `brecha_direccion.html`, la hoja de una página para el comité.
 
 La celda queda ocupada con `[*]` mientras la ventana está abierta: es el
 `mainloop()` de Tk y es normal. Se libera al cerrarla.
@@ -293,6 +294,41 @@ va en rojo. Cuando el gráfico ya no cabe de un vistazo, se desplaza de lado den
 de su panel y lo dice al pie; no se comprime ni se corta. El desplegable «Gráfico de la vista» ofrece además columnas por corte,
 para cuando sólo interesa el nivel y no el movimiento.
 
+### Vista dirección · la hoja de una página
+
+**Vista dirección** escribe `brecha_direccion.html`: no es el tablero con otro
+color, es otro documento con otra pregunta. El tablero sirve para revisar cifras;
+esta hoja sirve para decidir si hay que reconocer algo en los estados financieros.
+Por eso no se arma ni se desarma: se imprime, se proyecta y se manda por correo, y
+no cambia entre quien la abre y quien la recibe.
+
+Contesta cuatro preguntas en el orden en que las hace quien firma los estados:
+
+1. **¿De cuánto es la brecha?** La cifra sola, arriba, a 76 px. Una sola en toda la
+   página: si hay tres cifras heroicas no hay ninguna.
+2. **¿Sobre qué base?** Un gráfico de mancuernas, un renglón por corte: el punto
+   claro es lo registrado con la metodología local, el oscuro lo que resultaría del
+   método estatutario, y **el trazo que los une es la brecha**. Se eligió por encima
+   de dos barras juntas o de una apilada porque lo que importa no es cuánto mide
+   cada metodología, sino la distancia entre las dos.
+3. **¿Va creciendo?** La trayectoria de la brecha, corte a corte, con la escala
+   desde cero: cortar el eje exageraría la brecha, que es justo de lo que nos van a
+   acusar. Sólo los extremos llevan cifra; un número sobre cada punto no se lee.
+4. **¿De dónde sale?** La apertura por reserva, de mayor a menor, y debajo de cada
+   nombre cuánto supera el estatutario a los libros — en por ciento cuando es poco
+   (`+41% sobre libros`) y en veces cuando es mucho (`×108 sobre libros`), que es
+   como se entiende.
+
+Cierra con la nota relevante y **la tabla completa**: todos los cortes, las tres
+reservas, las dos metodologías, la brecha y la proporción. Ningún dato de la página
+vive sólo dentro de un gráfico.
+
+Los colores pasaron el validador de daltonismo: lila contra vino separan ΔE 19 en
+deuteranopia y 20 a vista normal, por encima del piso. Aun así cada punto va con
+leyenda, para que el color nunca sea la única pista. El interruptor de moneda es el
+mismo de las otras vistas, y al imprimir la portada se vuelve blanca con tinta vino
+en lugar de un bloque de tinta a sangre.
+
 ### Evolución de la diferencia
 
 **Ver evolución** escribe una página aparte con la diferencia de todos los cortes en
@@ -305,7 +341,7 @@ etiqueta directa, para que el color nunca sea la única pista.
 
 ## Comprobación
 
-`verificar.py` ejecuta el bloque sin abrir ventana y contrasta 419 cifras contra
+`verificar.py` ejecuta el bloque sin abrir ventana y contrasta 465 cifras contra
 los valores de control del cierre de junio 2026: los seis cortes concepto por
 concepto, la vista en millones, los indicadores, la estructura del HTML, el ida y
 vuelta completo por la base de datos (contra un SQLite, con el mismo código que
@@ -316,7 +352,11 @@ que pinta en vez del ancla—, la vista plana del servidor y el
 rechazo de nombres de base inválidos. Para el tipo de cambio de Banxico levanta un
 SIE de mentiras con la forma real de la respuesta —no llama a la red— y comprueba
 lo que de veras se puede equivocar: el cierre que cae en domingo, el token malo,
-la serie sin dato, la red caída y que no se pise lo tecleado a mano. Arma además la tablita de los actuarios tal
+la serie sin dato, la red caída, el relevo entre varios tokens y que no se pise lo
+tecleado a mano. De la hoja de dirección comprueba que haya una sola cifra heroica,
+que las cifras que dice sean las del histórico en las dos monedas, que la tabla de
+respaldo lleve todos los cortes, que un corte a medias quede fuera y avisado, y que
+sin ningún corte completo se niegue a dibujar una hoja vacía. Arma además la tablita de los actuarios tal
 como la mandan —título del corte, las tres reservas y su Total— en las tres formas
 en que puede venir el importe, y comprueba que el cruce trae la columna estatutaria
 y que el desajuste contra la balanza se avisa, cargando en los dos órdenes.
