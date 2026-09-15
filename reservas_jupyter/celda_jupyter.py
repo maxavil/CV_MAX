@@ -73,9 +73,13 @@ NOTA_PIE = ("Esta reserva se calcula una vez al año, al cierre del ejercicio, "
 NOTA_RELEVANTE = ("La diferencia por metodologías de El Salvador aún no ha sido "
                   "reconocida en los EEFF de QC.")
 
-# paleta de la vista objetivo
+# Paleta del tablero. El lila sustituyó al azul en los encabezados de las
+# metodologías. Los tres pasos se eligieron de modo que el texto blanco tenga
+# contraste de sobra sobre los dos oscuros (8.6:1 y 5.8:1); sobre el claro no
+# va texto blanco nunca, sólo relleno.
 PLUM, PLUM_DEEP, PLUM_SOFT = "#5B1A44", "#451234", "#7A2A5E"
-TEAL, TEAL_2, TEAL_SOFT = "#134E63", "#1B6C86", "#3E8AA6"
+LILA, LILA_2, LILA_3 = "#5B3A8C", "#7355A8", "#9B86C9"
+TEAL, TEAL_2, TEAL_SOFT = LILA, LILA_2, LILA_3   # nombres viejos, color nuevo
 ICE, ICE_2, PAPER, GROUND = "#E9F1F6", "#F5F9FB", "#FFFFFF", "#EFF3F6"
 INK, INK_2, INK_3 = "#16252D", "#4E6069", "#7B8C95"
 LINE, LINE_SOFT = "#C9D8E1", "#E1EAF0"
@@ -188,6 +192,16 @@ def etiqueta_periodo(k: str) -> str:
 def etiqueta_corta(k: str) -> str:
     a, m, _ = k.split("-")
     return f"{MESES[int(m) - 1].capitalize()} {a}"
+
+
+def etiqueta_cascada(k: str) -> str:
+    """El pie de la cascada es angosto: ahí el mes va abreviado a tres letras.
+
+    «Noviembre 2025» no cabe en el hueco de una barra y se encima con el nombre
+    de la reserva de al lado; «Nov 2025» sí.
+    """
+    a, m, _ = k.split("-")
+    return f"{MESES[int(m) - 1][:3].capitalize()} {a}"
 
 
 def match_concepto(texto: Any) -> "Concepto | None":
@@ -669,72 +683,81 @@ class Historico:
         return None if a is None or b is None else a - b
 
     # -------------------------------------------------------------- mensajes
-    def mensajes(self, actual: str, previo: "str | None", fx: "float | None" = None,
-                 fx_previo: "float | None" = None) -> "list[str]":
-        """Los tres mensajes clave, redactados con las cifras del propio corte.
+    def mensajes(self, actual: str, previo: "str | None",
+                 fx: "float | None" = None) -> "list[str]":
+        """Los tres mensajes clave ya redactados, en dólares o en pesos.
 
-        Con `fx` se redactan en pesos; sin él, en dólares. Cada corte se convierte
-        con SU tipo de cambio, igual que los indicadores: si no fuera así, los
-        mensajes dirían una variación y los KPIs otra.
+        `fx` es el ancla: un solo tipo de cambio para los dos cortes, de modo que
+        lo que se lee moviéndose es la reserva y no el dólar. Sin `fx` van en
+        dólares.
         """
+        k = 1.0 if fx is None else float(fx)
         sim = "USD" if fx is None else "MXN"
-        ka = 1.0 if fx is None else float(fx)                       # cierre actual
-        kp = 1.0 if fx is None else float(fx_previo or fx)          # cierre anterior
+        return [m["t"].replace("§SIM", sim).replace("§PCT", m.get("pct", ""))
+                .format(*[f"{v * k / 1e6:,.2f}" for v in m["v"]])
+                for m in self.mensajes_tpl(actual, previo)]
 
-        def q(v: float) -> str:
-            return f"{v / 1e6:,.2f}"
+    def mensajes_tpl(self, actual: str, previo: "str | None") -> "list[dict[str, Any]]":
+        """Los mensajes con huecos, para que el navegador los rellene.
 
-        d1_usd = self.diferencia(actual)
-        if d1_usd is None:
+        Cada uno trae el texto con `§SIM` donde va la moneda y `{0}`, `{1}`… donde
+        van los importes, más esos importes en dólares. Convertir es multiplicar:
+        con un solo tipo de cambio para toda la hoja, los porcentajes no cambian,
+        así que se dejan escritos.
+        """
+        d1 = self.diferencia(actual)
+        if d1 is None:
             falta = "el archivo de actuarios" if self.total(actual, "cnsf") is None else "la balanza"
-            return [
-                f"Al {etiqueta_periodo(actual)} solo se ha cargado una de las dos fuentes: "
-                f"falta {falta} de ese corte, así que todavía no hay diferencia que comparar.",
-                "Los cortes anteriores del histórico se conservan intactos.",
-            ]
+            return [{"t": f"Al {etiqueta_periodo(actual)} solo se ha cargado una de las dos "
+                          f"fuentes: falta {falta} de ese corte, así que todavía no hay "
+                          "diferencia que comparar.", "v": []},
+                    {"t": "Los cortes anteriores del histórico se conservan intactos.", "v": []}]
         if previo is None or not self.completo(previo):
-            return [
-                f"Al {etiqueta_periodo(actual)}, la diferencia entre metodologías "
-                f"asciende a {sim} {q(d1_usd * ka)} MM.",
-                "Agrega un corte anterior completo al histórico para comparar la evolución "
-                "del diferencial.",
-            ]
+            return [{"t": f"Al {etiqueta_periodo(actual)}, la diferencia entre metodologías "
+                          "asciende a §SIM {0} MM.", "v": [d1]},
+                    {"t": "Agrega un corte anterior completo al histórico para comparar la "
+                          "evolución del diferencial.", "v": []}]
 
-        d0_usd = self.diferencia(previo) or 0.0
-        d1, d0 = d1_usd * ka, d0_usd * kp
-        v_local = self.total(actual, "local") * ka - self.total(previo, "local") * kp
-        v_cnsf = self.total(actual, "cnsf") * ka - self.total(previo, "cnsf") * kp
+        d0 = self.diferencia(previo) or 0.0
+        v_local = self.total(actual, "local") - self.total(previo, "local")
+        v_cnsf = self.total(actual, "cnsf") - self.total(previo, "cnsf")
         rango = f"Entre {etiqueta_corta(previo).lower()} y {etiqueta_corta(actual).lower()}"
 
-        # el umbral se mide siempre en dólares, para que las dos versiones del
-        # texto hablen exactamente de las mismas reservas
-        def mueve(cid: str, lado: str) -> "tuple[float, float]":
-            a = self.datos[actual][lado].get(cid, 0.0)
-            b = self.datos[previo][lado].get(cid, 0.0)
-            return a - b, a * ka - b * kp
+        def mueve(cid: str, lado: str) -> float:
+            return (self.datos[actual][lado].get(cid, 0.0)
+                    - self.datos[previo][lado].get(cid, 0.0))
 
-        motor = max(((c, *mueve(c.id, "local")) for c in CONCEPTOS),
+        vals: "list[float]" = []
+
+        def hueco(v: float) -> str:
+            vals.append(abs(v))
+            return "{" + str(len(vals) - 1) + "}"
+
+        motor = max(((c, mueve(c.id, "local")) for c in CONCEPTOS),
                     key=lambda x: abs(x[1]), default=None)
         m1 = (f"{rango}, las reservas bajo QES Metodología local "
-              f"{'aumentan' if v_local >= 0 else 'disminuyen'} {sim} {q(abs(v_local))} MM")
+              f"{'aumentan' if v_local >= 0 else 'disminuyen'} §SIM {hueco(v_local)} MM")
         if motor and abs(motor[1]) > 5000:
-            m1 += (f", principalmente por {'el incremento' if motor[2] >= 0 else 'la reducción'} "
-                   f"de {sim} {q(abs(motor[2]))} MM en la "
+            m1 += (f", principalmente por {'el incremento' if motor[1] >= 0 else 'la reducción'} "
+                   f"de §SIM {hueco(motor[1])} MM en la "
                    f"{motor[0].label.replace('Reserva de ', 'reserva de ')}")
         m1 += "."
+        uno = {"t": m1, "v": list(vals)}
 
+        vals = []
         sube, baja = [], []
         for c in CONCEPTOS:
-            d_usd, d_disp = mueve(c.id, "cnsf")
-            if abs(d_usd) > 5000:
-                (sube if d_usd > 0 else baja).append((c, abs(d_disp)))
+            d = mueve(c.id, "cnsf")
+            if abs(d) > 5000:
+                (sube if d > 0 else baja).append((c, abs(d)))
 
         def lista(arr):
             return " y de ".join(
-                f"{sim} {q(d)} MM en {c.label.replace('Reserva de ', '').lower()}" for c, d in arr)
+                f"§SIM {hueco(d)} MM en {c.label.replace('Reserva de ', '').lower()}"
+                for c, d in arr)
 
         m2 = (f"Bajo el Método Estatutario, las reservas totales "
-              f"{'aumentan' if v_cnsf >= 0 else 'disminuyen'} {sim} {q(abs(v_cnsf))} MM.")
+              f"{'aumentan' if v_cnsf >= 0 else 'disminuyen'} §SIM {hueco(v_cnsf)} MM.")
         if sube and baja:
             m2 += (f" El incremento de {lista(sube)} fue "
                    f"{'parcialmente compensado' if v_cnsf >= 0 else 'más que compensado'} "
@@ -743,22 +766,24 @@ class Historico:
             m2 += f" El movimiento se concentra en el incremento de {lista(sube)}."
         elif baja:
             m2 += f" El movimiento se concentra en la disminución de {lista(baja)}."
+        dos = {"t": m2, "v": list(vals)}
 
+        vals = []
         v = d1 - d0
         m3 = ("El Método Estatutario mantiene una posición superior." if d1 >= 0
               else "La Metodología local se mantiene por encima del Método Estatutario.")
-        m3 += (f" La diferencia total por constitución pasa de {sim} {q(d0)} MM en "
-               f"{etiqueta_corta(previo).lower()} a {sim} {q(d1)} MM en "
+        m3 += (f" La diferencia total por constitución pasa de §SIM {hueco(d0)} MM en "
+               f"{etiqueta_corta(previo).lower()} a §SIM {hueco(d1)} MM en "
                f"{etiqueta_corta(actual).lower()}, con "
-               f"{'un incremento' if v >= 0 else 'una disminución'} de {sim} {q(abs(v))} MM")
+               f"{'un incremento' if v >= 0 else 'una disminución'} de §SIM {hueco(v)} MM")
+        pct = ""
         if d0:
-            m3 += f" ({'+' if v >= 0 else '−'}{abs(v / d0 * 100):.1f}%)"
-        m3 += "."
-        if fx is not None and abs(ka - kp) > 1e-9:
-            m3 += (f" En pesos la variación lleva dentro el efecto cambiario: "
-                   f"{kp:,.4f} al cierre de {etiqueta_corta(previo).lower()} contra "
-                   f"{ka:,.4f} al de {etiqueta_corta(actual).lower()}.")
-        return [m1, m2, m3]
+            # con un solo tipo de cambio para toda la hoja, el porcentaje es el
+            # mismo en las dos monedas: se escribe ya calculado
+            pct = f" ({'+' if v >= 0 else '−'}{abs(v / d0 * 100):.1f}%)"
+        m3 += "§PCT."
+        tres = {"t": m3, "v": list(vals), "pct": pct}
+        return [uno, dos, tres]
 
     # ---------------------------------------------------------------- texto
     def vista_texto(self, periodos: "Iterable[str] | None" = None) -> str:
@@ -1458,8 +1483,18 @@ input.sw{position:absolute;width:0;height:0;opacity:0;pointer-events:none}
 #m-mxn:focus-visible ~ .wrap label[for=m-mxn]{outline:2px solid var(--teal-2);outline-offset:-2px}
 .switch-note{font-size:14.49px;color:var(--ink-3);margin-top:5px;font-family:var(--mono)}
 .switch+.switch{margin-left:8px}
-#zoom label{font-family:var(--mono);font-size:13px}
-#zoom label.on{background:var(--teal);color:#fff}
+.zoomctl label{font-family:var(--mono);font-size:19px;font-weight:700;padding:2px 16px;
+               line-height:1.25;color:var(--teal)}
+.zoomctl label.off{color:var(--ink-3);cursor:default}
+.zoomctl #zval{font-family:var(--mono);font-size:14px;padding:7px 12px;color:var(--ink-2);
+               border-right:1px solid var(--line);min-width:58px;text-align:center}
+.ancla{margin-top:10px;display:flex;flex-wrap:wrap;align-items:center;gap:9px}
+.ancla{margin-bottom:2px}
+.ancla label{font-size:13.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
+             color:var(--teal-2);flex-basis:100%%}
+.ancla select{font-family:var(--mono);font-size:15.12px;color:var(--ink);background:var(--paper);
+              border:1px solid var(--line);border-radius:5px;padding:5px 9px;cursor:pointer}
+.ancla select:hover{border-color:var(--teal-soft)}
 
 /* ---- los meses que el lector mete y saca de la vista ---- */
 .meses{padding:14px 24px 16px;border-bottom:1px solid var(--line-soft);background:var(--ice-2)}
@@ -1513,7 +1548,7 @@ def _svg_cascada(hist: Historico, periodos: "Sequence[str]",
         return (hist.diferencia(p, cid) or 0.0) * tc[p] / 1e6
 
     # --- los peldaños: base, movimientos por reserva, base, y así -----------
-    pasos = [("base", etiqueta_corta(ps[0]), "Diferencia total",
+    pasos = [("base", etiqueta_cascada(ps[0]), "Diferencia total",
               dif(ps[0]), dif_mxn(ps[0]))]
     for a, b in zip(ps, ps[1:]):
         for c in CONCEPTOS:
@@ -1522,7 +1557,7 @@ def _svg_cascada(hist: Historico, periodos: "Sequence[str]",
                 continue
             pasos.append(("delta", CORTO_RESERVA.get(c.id, c.label),
                           "Incremento" if v >= 0 else "Disminución", v, v_mxn))
-        pasos.append(("base", etiqueta_corta(b), "Diferencia total", dif(b), dif_mxn(b)))
+        pasos.append(("base", etiqueta_cascada(b), "Diferencia total", dif(b), dif_mxn(b)))
 
     # --- geometría ----------------------------------------------------------
     corrida, geo, maxv = 0.0, [], max(dif(p) for p in ps)
@@ -1561,7 +1596,7 @@ def _svg_cascada(hist: Historico, periodos: "Sequence[str]",
         cx = L + hueco * i + hueco / 2
         ya, yb = y(max(y0, y1)), y(min(y0, y1))
         alto = max(3.0, yb - ya)
-        relleno = "#8E2A66" if tipo == "base" else (TEAL_2 if valor >= 0 else NEG)
+        relleno = PLUM if tipo == "base" else (TEAL_2 if valor >= 0 else NEG)
         o.append(f'<rect x="{cx - bw / 2:.1f}" y="{ya:.1f}" width="{bw:.1f}" '
                  f'height="{alto:.1f}" fill="{relleno}" rx="1" />')
         signo = "" if tipo == "base" else ("+" if valor >= 0 else "−")
@@ -1607,14 +1642,26 @@ def _svg_cascada(hist: Historico, periodos: "Sequence[str]",
 _JS_VISTA = r"""
 const $ = (id) => document.getElementById(id);
 const n2 = (v) => v.toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2});
+const n4 = (v) => v.toLocaleString("en-US", {minimumFractionDigits: 4, maximumFractionDigits: 4});
 const esc = (t) => String(t == null ? "" : t).replace(/&/g, "&amp;").replace(/</g, "&lt;")
                     .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 const dual = (u, m) => `<span class="v-usd">${u}</span><span class="v-mxn">${m}</span>`;
 const celda = (v) => (v == null || Math.abs(v / 1e6) < 0.005) ? "—" : n2(v / 1e6);
-const dualMM = (v, fx) => dual(celda(v), v == null ? "—" : celda(v * fx));
 
 let sel = D.activos.slice();
 let barras = 0;          // cuántas barras trajo la última cascada
+
+/* El ancla del tipo de cambio.
+   Los pesos de toda la hoja salen de UN solo tipo de cambio: el de Banco de
+   México al cierre que el lector ancla arriba. Por omisión, el último corte con
+   información. Así los importes en pesos de todos los meses son comparables
+   entre sí —lo que se mueve es la reserva, no el dólar— y cambiar el ancla
+   vuelve a convertir todo el tablero de golpe: matriz, indicadores, cascada,
+   mensajes clave y diferencias por reserva. */
+let ancla = D.cortes[D.ancla] ? D.ancla : D.orden[D.orden.length - 1];
+const fxA = () => (D.cortes[ancla] || {}).fx || 1;
+const anclaCorto = () => (D.cortes[ancla] || {}).corto || "";
+const dualMM = (v) => dual(celda(v), v == null ? "—" : celda(v * fxA()));
 
 function dif(p, cid) {
   const c = D.cortes[p];
@@ -1647,31 +1694,97 @@ function matriz(ps) {
                 + esc(D.cortes[prev].corto) + "</th>";
   h1 += "</tr>"; h2 += "</tr>";
 
-  const fxA = act ? D.cortes[act].fx : 1, fxP = prev ? D.cortes[prev].fx : fxA;
-  const inc = (a, b) => (a == null || b == null) ? dual("—", "—")
-                        : dual(celda(a - b), celda(a * fxA - b * fxP));
+  const inc = (a, b) => (a == null || b == null) ? dual("—", "—") : dualMM(a - b);
   let cuerpo = "";
   D.conceptos.forEach((c) => {
     cuerpo += `<tr><th>${esc(c.label)}${c.nota ? " *" : ""}</th>`;
     ps.forEach((p) => {
-      const e = D.cortes[p], fx = e.fx;
-      cuerpo += `<td class="gstart">${dualMM(e.local[c.id], fx)}</td>`
-             +  `<td>${dualMM(e.cnsf[c.id], fx)}</td>`
-             +  `<td class="dif">${dualMM(dif(p, c.id), fx)}</td>`;
+      const e = D.cortes[p];
+      cuerpo += `<td class="gstart">${dualMM(e.local[c.id])}</td>`
+             +  `<td>${dualMM(e.cnsf[c.id])}</td>`
+             +  `<td class="dif">${dualMM(dif(p, c.id))}</td>`;
     });
     if (prev) cuerpo += `<td class="delta">${inc(dif(act, c.id), dif(prev, c.id))}</td>`;
     cuerpo += "</tr>";
   });
   cuerpo += '<tr class="total"><th>Total reservas</th>';
   ps.forEach((p) => {
-    const fx = D.cortes[p].fx;
-    cuerpo += `<td class="gstart">${dualMM(total(p, "local"), fx)}</td>`
-           +  `<td>${dualMM(total(p, "cnsf"), fx)}</td>`
-           +  `<td class="dif">${dualMM(dif(p), fx)}</td>`;
+    cuerpo += `<td class="gstart">${dualMM(total(p, "local"))}</td>`
+           +  `<td>${dualMM(total(p, "cnsf"))}</td>`
+           +  `<td class="dif">${dualMM(dif(p))}</td>`;
   });
   if (prev) cuerpo += `<td class="delta">${inc(dif(act), dif(prev))}</td>`;
   cuerpo += "</tr>";
   $("matriz").innerHTML = `<thead>${h1}${h2}</thead><tbody>${cuerpo}</tbody>`;
+}
+
+/* ---------------- los tres indicadores de arriba ---------------- */
+function caja(clase, label, alcance, valor, alt) {
+  return `<div class="kpi${clase}"><div class="k-label">${esc(label)}</div>`
+       + `<div class="k-scope">${esc(alcance)}</div>`
+       + `<div class="k-value">${valor}</div>`
+       + `<div class="k-alt">${alt}</div></div>`;
+}
+function kpis(act, prev) {
+  const k = fxA(), c = D.cortes[act], d1 = dif(act);
+  if (d1 == null) {
+    const falta = total(act, "cnsf") == null ? "el archivo de actuarios" : "la balanza";
+    return caja("", "Diferencia total", c.corto, "n/d",
+                esc(`falta ${falta} de este corte`));
+  }
+  const u = (v) => n2(Math.abs(v) / 1e6), m = (v) => n2(Math.abs(v) * k / 1e6);
+  let out = caja("", "Diferencia total", c.corto,
+      dual(`USD ${n2(d1 / 1e6)}`, `MXN ${n2(d1 * k / 1e6)}`) + ' <span class="u">MM</span>',
+      dual(`~MXN ${n2(d1 * k / 1e6)} MM · ${n4(k)} MXN/USD`,
+           `USD ${n2(d1 / 1e6)} MM · ${n4(k)} MXN/USD`));
+  if (prev && D.cortes[prev].completo) {
+    const d0 = dif(prev) || 0, v = d1 - d0;
+    const sg = v >= 0 ? "+" : "−";
+    const alcance = `${D.cortes[prev].corto} → ${D.cortes[act].corto}`;
+    out += caja(" accent", "Variación del periodo", alcance,
+        dual(`${sg}USD ${u(v)}`, `${sg}MXN ${m(v)}`) + ' <span class="u">MM</span>',
+        dual(`~MXN ${m(v)} MM`, `~USD ${u(v)} MM`));
+    // con un solo tipo de cambio para toda la hoja el porcentaje no depende de
+    // la moneda: es el mismo número en las dos
+    const pct = d0 ? `${sg}${Math.abs(v / d0 * 100).toFixed(1)}%` : "n/d";
+    out += caja("", "Variación % de la diferencia", alcance, pct,
+        dual(`sobre USD ${n2(d0 / 1e6)} MM`, `sobre MXN ${n2(d0 * k / 1e6)} MM`));
+  }
+  return out;
+}
+
+/* ---------------- los mensajes clave ---------------- */
+/* Vienen de Python con huecos: §SIM donde va la moneda, {0}, {1}… donde van los
+   importes en dólares y §PCT donde va el porcentaje. Rellenarlos aquí evita
+   guardar una copia del texto por cada tipo de cambio posible. */
+function rellena(m) {
+  const k = fxA();
+  const pon = (sim, k_) => esc(m.t.replace(/§SIM/g, sim).replace(/§PCT/g, m.pct || "")
+      .replace(/\{(\d+)\}/g, (_, i) => n2(m.v[+i] * k_ / 1e6)));
+  return dual(pon("USD", 1), pon("MXN", k));
+}
+function mensajes(tpl) {
+  return (tpl || []).map((m) => `<li>${rellena(m)}</li>`).join("");
+}
+
+/* ---------------- las diferencias por reserva ---------------- */
+function porReserva(act) {
+  const k = fxA(), d1 = dif(act);
+  if (d1 == null) return '<li><span>Este corte todavía no tiene las dos fuentes '
+                       + 'cargadas.</span><span class="v">n/d</span></li>';
+  const fila = (etq, d) =>
+    `<li><span>${etq}</span><span class="v">`
+    + dual(`USD ${n2(d / 1e6)} MM`, `MXN ${n2(d * k / 1e6)} MM`)
+    + "<small>" + dual(`~MXN ${n2(d * k / 1e6)} MM`, `USD ${n2(d / 1e6)} MM`)
+    + "</small></span></li>";
+  let out = "";
+  D.conceptos.forEach((c) => {
+    const d = dif(act, c.id);
+    if (d == null || Math.abs(d) < 5000) return;
+    out += fila(esc(c.label), d);
+  });
+  return out + fila("Total de reservas<br /><small>incremento por "
+                    + "constitución</small>", d1);
 }
 
 /* ---------------- la cascada encadenada ---------------- */
@@ -1681,9 +1794,9 @@ function cascada(ps) {
     return '<p class="chart-note">Hacen falta al menos dos cortes '
          + 'con las dos fuentes cargadas.</p>'; }
   const mm = (p, c) => (dif(p, c) || 0) / 1e6;
-  const mx = (p, c) => (dif(p, c) || 0) * D.cortes[p].fx / 1e6;
+  const mx = (p, c) => (dif(p, c) || 0) * fxA() / 1e6;
 
-  const pasos = [["base", D.cortes[comp[0]].corto, "Diferencia total", mm(comp[0]), mx(comp[0])]];
+  const pasos = [["base", D.cortes[comp[0]].cascada, "Diferencia total", mm(comp[0]), mx(comp[0])]];
   for (let i = 0; i + 1 < comp.length; i++) {
     const a = comp[i], b = comp[i + 1];
     D.conceptos.forEach((c) => {
@@ -1692,7 +1805,7 @@ function cascada(ps) {
       pasos.push(["delta", D.cortoReserva[c.id] || c.label,
                   v >= 0 ? "Incremento" : "Disminución", v, vx]);
     });
-    pasos.push(["base", D.cortes[b].corto, "Diferencia total", mm(b), mx(b)]);
+    pasos.push(["base", D.cortes[b].cascada, "Diferencia total", mm(b), mx(b)]);
   }
 
   let run = 0, geo = [], maxv = Math.max(...comp.map((p) => mm(p)));
@@ -1710,9 +1823,9 @@ function cascada(ps) {
            + `role="img" aria-label="Cascada de la diferencia entre metodologías">`,
            `<line x1="${L - 8}" y1="${y(0).toFixed(1)}" x2="${W - R}" y2="${y(0).toFixed(1)}" `
            + `stroke="${D.linea}" stroke-width="1" />`];
-  [["v-usd", "MM USD"], ["v-mxn", "MM MXN"]].forEach(([cl, u]) =>
+  [["v-usd", "MM USD"], ["v-mxn", "MM MXN"]].forEach(([cl, un]) =>
     o.push(`<text class="${cl}" x="${L - 8}" y="${T - 18}" fill="${D.tinta3}" `
-         + `font-family="Consolas,monospace" font-size="14">Diferencia acumulada (${u})</text>`));
+         + `font-family="Consolas,monospace" font-size="14">Diferencia acumulada (${un})</text>`));
 
   geo.forEach(([t, etq, sub, v, vx, y0, y1], i) => {
     const cx = L + hueco * i + hueco / 2;
@@ -1759,6 +1872,9 @@ function pinta() {
     i.checked = sel.includes(i.dataset.p);
     i.closest(".mes").classList.toggle("off", !i.checked);
   });
+  $("selancla").value = ancla;
+  $("lineafx").textContent = `${n4(fxA())} MXN/USD convierte toda la hoja: `
+    + `matriz, indicadores, cascada y mensajes`;
   if (!sel.length) {
     $("matriz").innerHTML = '<tbody><tr><td style="padding:26px">Marca al menos un mes '
                           + 'para armar la vista.</td></tr></tbody>';
@@ -1767,12 +1883,12 @@ function pinta() {
     return;
   }
   const act = sel[sel.length - 1], prev = sel.length > 1 ? sel[sel.length - 2] : null;
-  const par = prev ? D.pares[prev + "|" + act] : null;
+  const tpl = prev ? D.pares[prev + "|" + act] : D.solos[act];
 
   matriz(sel);
-  $("kpis").innerHTML = par ? par.kpis : D.solos[act].kpis;
-  $("claves").innerHTML = par ? par.mensajes : D.solos[act].mensajes;
-  $("reservas").innerHTML = D.solos[act].reservas;
+  $("kpis").innerHTML = kpis(act, prev);
+  $("claves").innerHTML = mensajes(tpl);
+  $("reservas").innerHTML = porReserva(act);
   $("treservas").textContent = "Diferencias a " + D.cortes[act].corto.toLowerCase()
                              + " por reserva (estatutario − local)";
 
@@ -1802,10 +1918,6 @@ function pinta() {
   // se realimenta, porque la propia clase cambia el ancho que se mide.
   $("banda").classList.toggle("ancha", barras >= 6);
 
-  const fxs = [...new Set(sel.map((p) => D.cortes[p].fx.toFixed(4)))];
-  $("lineafx").textContent = fxs.length > 1
-    ? "Tipo de cambio de cierre · " + sel.map((p) => `${D.cortes[p].corto} ${D.cortes[p].fx.toFixed(4)}`).join(" · ") + " MXN/USD"
-    : `Tipo de cambio: ${fxs[0]} MXN / USD`;
   $("mesesn").textContent = `${sel.length} de ${D.orden.length} meses en la vista`
     + (sel.length < D.orden.length ? " · marca los demás para agregarlos" : "");
   const org = D.cortes[act].origen || {};
@@ -1824,106 +1936,22 @@ document.querySelectorAll("#meses input").forEach((i) =>
     sel = i.checked ? [...new Set([...sel, p])] : sel.filter((x) => x !== p);
     pinta();
   }));
-document.querySelectorAll("#zoom label").forEach((l) =>
-  l.addEventListener("click", () => {
-    document.querySelectorAll("#zoom label").forEach((x) => x.classList.remove("on"));
-    l.classList.add("on");
-    $("wrap").style.zoom = l.dataset.z;
-  }));
-$("wrap").style.zoom = "1.15";
+/* cambiar el ancla vuelve a convertir todo el tablero, no sólo el encabezado */
+$("selancla").addEventListener("change", (e) => { ancla = e.target.value; pinta(); });
+/* el tamaño de letra: un menos y un más que mueven todo el tablero de golpe */
+let zoom = 1.15;
+function ponZoom(v) {
+  zoom = Math.min(2, Math.max(0.8, Math.round(v * 100) / 100));
+  $("wrap").style.zoom = zoom;
+  $("zval").textContent = Math.round(zoom * 100) + "%";
+  $("zmenos").classList.toggle("off", zoom <= 0.8);
+  $("zmas").classList.toggle("off", zoom >= 2);
+}
+$("zmenos").addEventListener("click", () => ponZoom(zoom - 0.1));
+$("zmas").addEventListener("click", () => ponZoom(zoom + 0.1));
+ponZoom(1.15);
 pinta();
 """
-
-
-def _kpis_html(hist: Historico, actual: str, previo: "str | None",
-               tc: "dict[str, float]") -> str:
-    """Los tres indicadores de arriba, en las dos monedas."""
-    fx_a = tc[actual]
-    dif_actual = hist.diferencia(actual)
-    d1 = dif_actual or 0.0
-    if dif_actual is None:
-        falta = "el archivo de actuarios" if hist.total(actual, "cnsf") is None else "la balanza"
-        return (f'<div class="kpi"><div class="k-label">Diferencia total</div>'
-                f'<div class="k-scope">{esc(etiqueta_corta(actual))}</div>'
-                f'<div class="k-value">n/d</div>'
-                f'<div class="k-alt">falta {falta} de este corte</div></div>')
-
-    kpis = [f'<div class="kpi"><div class="k-label">Diferencia total</div>'
-            f'<div class="k-scope">{esc(etiqueta_corta(actual))}</div>'
-            f'<div class="k-value">{dual_texto("{sim} {n}", d1, fx_a)} '
-            f'<span class="u">MM</span></div>'
-            f'<div class="k-alt">'
-            + dual(f"~MXN {d1 * fx_a / 1e6:,.2f} MM al cierre",
-                   f"USD {d1 / 1e6:,.2f} MM · {fx_a:,.4f} MXN/USD")
-            + '</div></div>']
-    if previo and hist.completo(previo):
-        d0 = hist.diferencia(previo) or 0.0
-        fx_p = tc[previo]
-        v = d1 - d0
-        # en pesos, cada cierre a su propio tipo de cambio: así lleva dentro el
-        # efecto cambiario, como debe ser
-        v_mxn = d1 * fx_a - d0 * fx_p
-        alcance = f"{etiqueta_corta(previo)} → {etiqueta_corta(actual)}"
-        kpis.append(f'<div class="kpi accent"><div class="k-label">Variación del periodo</div>'
-                    f'<div class="k-scope">{esc(alcance)}</div>'
-                    f'<div class="k-value">'
-                    + dual(f'{"+" if v >= 0 else "−"}USD {abs(v) / 1e6:,.2f}',
-                           f'{"+" if v_mxn >= 0 else "−"}MXN {abs(v_mxn) / 1e6:,.2f}')
-                    + ' <span class="u">MM</span></div>'
-                    f'<div class="k-alt">'
-                    + dual(f"~MXN {abs(v_mxn) / 1e6:,.2f} MM",
-                           "incluye el efecto cambiario")
-                    + '</div></div>')
-        pct = f'{"+" if v >= 0 else "−"}{abs(v / d0 * 100):.1f}%' if d0 else "n/d"
-        pct_mxn = (f'{"+" if v_mxn >= 0 else "−"}{abs(v_mxn / (d0 * fx_p) * 100):.1f}%'
-                   if d0 * fx_p else "n/d")
-        kpis.append(f'<div class="kpi"><div class="k-label">Variación % de la diferencia</div>'
-                    f'<div class="k-scope">{esc(alcance)}</div>'
-                    f'<div class="k-value">{dual(pct, pct_mxn)}</div>'
-                    f'<div class="k-alt">'
-                    + dual(f"sobre USD {d0 / 1e6:,.2f} MM",
-                           f"sobre MXN {d0 * fx_p / 1e6:,.2f} MM")
-                    + '</div></div>')
-    return "".join(kpis)
-
-
-def _mensajes_html(hist: Historico, actual: str, previo: "str | None",
-                   tc: "dict[str, float]") -> str:
-    """Los mensajes clave, en las dos monedas."""
-    fx_a = tc[actual]
-    return "".join(
-        f'<li>{dual(esc(u), esc(m))}</li>'
-        for u, m in zip(hist.mensajes(actual, previo),
-                        hist.mensajes(actual, previo, fx=fx_a,
-                                      fx_previo=tc.get(previo, fx_a) if previo else fx_a)))
-
-
-def _por_reserva_html(hist: Historico, actual: str, tc: "dict[str, float]") -> str:
-    """La lista de diferencias por reserva del último corte."""
-    fx_a = tc[actual]
-    dif_actual = hist.diferencia(actual)
-    if dif_actual is None:
-        return ('<li><span>Este corte todavía no tiene las dos fuentes cargadas.</span>'
-                '<span class="v">n/d</span></li>')
-    out = ""
-    for c in CONCEPTOS:
-        d = hist.diferencia(actual, c.id)
-        if d is None or abs(d) < 5000:
-            continue
-        out += (f"<li><span>{esc(c.label)}</span>"
-                f'<span class="v">{dual_texto("{sim} {n} MM", d, fx_a)}'
-                f"<small>"
-                + dual(f"~MXN {d * fx_a / 1e6:,.2f} MM", f"USD {d / 1e6:,.2f} MM")
-                + "</small></span></li>")
-    out += ('<li><span>Total de reservas<br />'
-            '<small>incremento por constitución</small></span>'
-            f'<span class="v">{dual_texto("{sim} {n} MM", dif_actual, fx_a)}'
-            f"<small>"
-            + dual(f"~MXN {dif_actual * fx_a / 1e6:,.2f} MM",
-                   f"USD {dif_actual / 1e6:,.2f} MM")
-            + "</small></span></li>")
-    return out
-
 
 def _matriz_html(hist: Historico, ps: "Sequence[str]", tc: "dict[str, float]") -> str:
     """La matriz, armada en Python. La usa el respaldo sin JavaScript."""
@@ -1986,8 +2014,11 @@ def construir_html(hist: Historico, periodos: "Sequence[str] | None" = None,
     se rehace sola: matriz, indicadores, cascada, mensajes clave y diferencias
     por reserva. Nada viaja a ningún servidor; el HTML se basta solo.
 
-    Las cifras van en las dos monedas y el interruptor decide cuál se ve. Cada
-    corte se convierte con SU tipo de cambio de cierre.
+    Las cifras van en las dos monedas y el interruptor decide cuál se ve. Los
+    pesos salen de UN solo tipo de cambio —el de Banco de México al cierre que
+    el lector ancla arriba, por omisión el último corte de la vista—, de modo
+    que los importes de todos los meses son comparables entre sí. Cambiar el
+    ancla vuelve a convertir el tablero entero.
     """
     ps = list(periodos) if periodos else hist.periodos()[-PERIODOS_EN_VISTA:]
     if not ps:
@@ -2003,33 +2034,43 @@ def construir_html(hist: Historico, periodos: "Sequence[str] | None" = None,
         e = hist.datos[p]
         cortes[p] = {
             "corto": etiqueta_corta(p), "largo": etiqueta_periodo(p),
+            "cascada": etiqueta_cascada(p),
             "local": {c.id: e["local"].get(c.id) for c in CONCEPTOS},
             "cnsf": {c.id: e["cnsf"].get(c.id) for c in CONCEPTOS},
             "fx": tc[p], "completo": hist.completo(p),
             "etiqueta": e.get("etiqueta"), "aviso": e.get("aviso"),
             "origen": e.get("origen", {}),
         }
+    # Los mensajes van con huecos: el navegador los rellena con el ancla que el
+    # lector elija. Así la redacción sigue viviendo sólo aquí y el archivo no
+    # engorda con una copia por cada tipo de cambio posible.
     pares, solos = {}, {}
     for a in todos:
-        solos[a] = {"kpis": _kpis_html(hist, a, None, tc),
-                    "mensajes": _mensajes_html(hist, a, None, tc),
-                    "reservas": _por_reserva_html(hist, a, tc)}
+        solos[a] = hist.mensajes_tpl(a, None)
         for b in todos:
-            if b >= a:
-                continue
-            pares[f"{b}|{a}"] = {"kpis": _kpis_html(hist, a, b, tc),
-                                 "mensajes": _mensajes_html(hist, a, b, tc)}
+            if b < a:
+                pares[f"{b}|{a}"] = hist.mensajes_tpl(a, b)
+
+    # el ancla: por omisión, el tipo de cambio del último corte con información
+    anclas = [{"p": p_, "corto": etiqueta_corta(p_), "fx": tc[p_]} for p_ in todos]
+    ancla = ps[-1]
+    # el respaldo sin JavaScript se arma con el ancla de omisión, igual que la hoja
+    tc_ancla = {p: tc[ancla] for p in todos}
     datos = {
         "conceptos": [{"id": c.id, "label": c.label, "nota": c.nota} for c in CONCEPTOS],
         "cortes": cortes, "orden": todos, "activos": list(ps),
         "pares": pares, "solos": solos, "grafico": grafico,
-        "colorBase": "#8E2A66", "colorSube": TEAL_2, "colorBaja": NEG,
+        "anclas": anclas, "ancla": ancla,
+        "colorBase": PLUM, "colorSube": TEAL_2, "colorBaja": NEG,
         "linea": LINE, "tinta": INK, "tinta3": INK_3, "plum": PLUM, "teal": TEAL,
         "serieColor": SERIE_COLOR,
         "cortoReserva": CORTO_RESERVA,
     }
 
     sello = dt.datetime.now().strftime("%d/%m/%Y %H:%M")
+    opciones_ancla = "".join(
+        f'<option value="{esc(a["p"])}"{" selected" if a["p"] == ancla else ""}>'
+        f'{esc(a["corto"])}  ·  {a["fx"]:,.4f} MXN/USD</option>' for a in reversed(anclas))
     casillas = "".join(
         f'<label class="mes{"" if p in ps else " off"}">'
         f'<input type="checkbox" data-p="{esc(p)}"{" checked" if p in ps else ""} />'
@@ -2055,12 +2096,18 @@ def construir_html(hist: Historico, periodos: "Sequence[str] | None" = None,
       <div>
         <h2>Resultados reservas técnicas QES</h2>
         <p class="tag">Comparativo de metodologías y evolución del diferencial</p>
+        <div class="ancla">
+          <label for="selancla">Tipo de cambio Banco de México, al cierre de</label>
+          <select id="selancla">{opciones_ancla}</select>
+        </div>
         <p class="fx" id="lineafx"></p>
         <div class="switch" role="group" aria-label="Moneda">
           <label for="m-usd">Dólares</label><label for="m-mxn">Pesos</label>
         </div>
-        <div class="switch" role="group" aria-label="Tamaño de letra" id="zoom">
-          <label data-z="1">Normal</label><label data-z="1.15" class="on">Grande</label><label data-z="1.35">Muy grande</label>
+        <div class="switch zoomctl" role="group" aria-label="Tamaño de letra" id="zoom">
+          <label id="zmenos" title="Letra más chica">−</label>
+          <span id="zval">115%</span>
+          <label id="zmas" title="Letra más grande">+</label>
         </div>
       </div>
       <div class="kpis" id="kpis"></div>
@@ -2075,8 +2122,8 @@ def construir_html(hist: Historico, periodos: "Sequence[str] | None" = None,
     <noscript>
       <div class="flags">Con JavaScript apagado la hoja no se puede rehacer sola.
         Abajo van los cortes con los que se generó: {esc(", ".join(etiqueta_corta(p) for p in ps))}.</div>
-      <div class="table-wrap">{_matriz_html(hist, ps, tc)}</div>
-      <div class="graf-wrap">{_svg_cascada(hist, [p for p in ps if hist.completo(p)], tc)}</div>
+      <div class="table-wrap">{_matriz_html(hist, ps, tc_ancla)}</div>
+      <div class="graf-wrap">{_svg_cascada(hist, [p for p in ps if hist.completo(p)], tc_ancla)}</div>
     </noscript>
     <div class="table-wrap">
       <table class="matrix" id="matriz"></table>
@@ -2129,11 +2176,13 @@ const D = {json.dumps(datos, ensure_ascii=False)};
 # 7 bis. La evolución de la diferencia mes con mes (el botón «Ver evolución»)
 # -----------------------------------------------------------------------------
 
-# Colores de serie: salen de la paleta de la casa, pero elegidos entre los pasos
-# que separan bien para daltonismo (vino oscuro contra azul claro, ΔE 25 en
-# deuteranopia). Aun así van con leyenda y etiqueta directa: el color nunca es
-# la única pista de qué es cada cosa.
-SERIE_COLOR = {"rrc": "#3E8AA6", "rsnr": "#5B1A44", "rsr": "#16252D"}
+# Colores de serie: los tres salen de la paleta de la casa, pero elegidos entre
+# los pasos que separan bien para daltonismo. El peor par es lila contra vino,
+# ΔE 19 en deuteranopia y 20 a vista normal; el ocre se despega de los dos. El
+# tinta oscuro que había antes para siniestros reportados se quitaba mal del
+# vino (ΔE 4.6) y por eso ya no está. Aun así van con leyenda y etiqueta
+# directa: el color nunca es la única pista de qué es cada cosa.
+SERIE_COLOR = {"rrc": LILA_2, "rsnr": PLUM, "rsr": WARN}
 
 # al pie de la cascada el nombre completo no cabe sin encimarse con el de al lado
 CORTO_RESERVA = {"rrc": "Riesgos en curso", "rsr": "Reportados",
@@ -2298,7 +2347,12 @@ def construir_html_evolucion(hist: Historico, periodos: "Sequence[str] | None" =
         f'<span class="chip"><i style="background:{SERIE_COLOR.get(c.id, TEAL)}"></i>'
         f'{esc(c.label.replace("Reserva de ", ""))}</span>' for c in series)
 
-    tc = {p: hist.fx(p, fx) for p in completos}
+    # Una sola conversión para toda la página, igual que en la vista: el ancla es
+    # el tipo de cambio de Banco de México al último corte con información. Aquí
+    # no hay desplegable porque la página no lleva JavaScript, pero el criterio
+    # es el mismo: lo que se ve moverse es la reserva, no el dólar.
+    ancla = hist.fx(completos[-1], fx)
+    tc = {p: ancla for p in completos}
     enc = "".join(f"<th>{esc(etiqueta_corta(p))}</th>" for p in completos)
     filas = ""
     for c in series:
@@ -2330,11 +2384,9 @@ def construir_html_evolucion(hist: Historico, periodos: "Sequence[str] | None" =
     sello = dt.datetime.now().strftime("%d/%m/%Y %H:%M")
     omitidos = [p for p in ps if p not in completos]
 
-    distintos = len({round(v_, 6) for v_ in tc.values()}) > 1
-    linea_fx = (("Tipo de cambio de cierre · "
-                 + " · ".join(f"{etiqueta_corta(p)} {tc[p]:,.4f}" for p in completos)
-                 + " MXN/USD") if distintos
-                else f"Tipo de cambio: {fx_fin:,.4f} MXN / USD")
+    linea_fx = (f"Tipo de cambio Banco de México al cierre de "
+                f"{etiqueta_corta(completos[-1]).lower()}: {ancla:,.4f} MXN/USD · "
+                f"con este se convierte toda la página")
 
     css_extra = """
 table.ev-t{border-collapse:collapse;width:100%;min-width:640px;
@@ -2377,7 +2429,7 @@ table.ev-t tr.var th{font-weight:400;color:var(--ink-2);font-size:12px}
           <div class="k-scope">{esc(etiqueta_corta(completos[-1]))}</div>
           <div class="k-value">{dual_texto("{sim} {n}", d_fin, fx_fin)} <span class="u">MM</span></div>
           <div class="k-alt">{dual(f"~MXN {d_fin * fx_fin / 1e6:,.2f} MM",
-                                   f"al cierre · {fx_fin:,.4f} MXN/USD")}</div></div>
+                                   f"al ancla · {fx_fin:,.4f} MXN/USD")}</div></div>
         <div class="kpi accent"><div class="k-label">Desde el primer corte</div>
           <div class="k-scope">{esc(etiqueta_corta(completos[0]))} → {esc(etiqueta_corta(completos[-1]))}</div>
           <div class="k-value">{dual(f'{"+" if v >= 0 else "−"}USD {abs(v) / 1e6:,.2f}',
@@ -2665,7 +2717,7 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
              anchor="w").grid(row=0, column=0, sticky="w")
     tk.Label(rejilla, text="Tabla", bg=PAPER, fg=INK_3, font=(UI, 8, "bold"),
              anchor="w").grid(row=0, column=1, sticky="w", padx=(4, 0))
-    tk.Label(rejilla, text="TC de cierre", bg=PAPER, fg=INK_3, font=(UI, 8, "bold"),
+    tk.Label(rejilla, text="TC Banxico", bg=PAPER, fg=INK_3, font=(UI, 8, "bold"),
              anchor="w").grid(row=0, column=2, sticky="w", padx=(8, 0))
     combos: "dict[str, ttk.Combobox]" = {}
     fx_ranura: "dict[str, tk.StringVar]" = {}
@@ -2679,9 +2731,11 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
         tk.Entry(rejilla, textvariable=var, width=9, font=(MONO, 9)).grid(
             row=r, column=2, sticky="w", pady=2, padx=(8, 0))
         fx_ranura[clave] = var
-    tk.Label(sel, text="El tipo de cambio de cada columna es el de SU cierre: diciembre se "
-                       "convierte al de diciembre, no al de hoy. En blanco usa el de abajo. "
-                       "La vista guarda las dos monedas y trae un botón para cambiar entre ellas.",
+    tk.Label(sel, text="Anota el tipo de cambio de Banco de México al cierre de cada mes "
+                       "(el de obligaciones a ese corte). En blanco usa el de abajo. La vista "
+                       "guarda las dos monedas, con un botón para cambiar entre ellas, y "
+                       "convierte TODO con uno solo de estos: el ancla, que por omisión es la "
+                       "del último corte y que el lector puede cambiar desde el propio HTML.",
              bg=PAPER, fg=INK_3, font=(UI, 8), anchor="w",
              wraplength=ancho_texto, justify="left").pack(fill="x", padx=14, pady=(2, 6))
 

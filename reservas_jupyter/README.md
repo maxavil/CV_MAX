@@ -27,8 +27,8 @@ reservas_jupyter/
 4. **Conectar** al servidor de auditoría, **Crear tablas** (solo la primera vez)
    y **Subir al servidor** para dejar la copia del mes.
 5. Elige las tres tablas de la vista en los desplegables: *Diciembre · t-1 · t*,
-   y el tipo de cambio de cierre de cada una. Si quieres más columnas, marca los
-   cortes adicionales de abajo.
+   y el tipo de cambio de Banco de México al cierre de cada una. Si quieres más
+   columnas, marca los cortes adicionales de abajo.
 6. Pica **Procesar**. Se escribe `vista_reservas_AAAA-MM-DD.html` junto al
    notebook y se abre en el navegador. **Ver evolución** escribe
    `evolucion_diferencia.html` con la diferencia mes con mes.
@@ -77,7 +77,8 @@ importe mil veces más chico en el reporte.
 de constitución del estatutario, sale positiva). Total = suma de los tres conceptos
 de cada lado. Incremento = diferencia del corte actual − la del corte anterior
 mostrado. Variación % = incremento ÷ diferencia anterior. La conversión a pesos usa
-el tipo de cambio editable de la ventana (por omisión 17.4986 MXN/USD).
+un solo tipo de cambio para toda la hoja —el ancla, ver abajo—; el de la ventana
+(por omisión 17.4986 MXN/USD) es el que se aplica a los cortes sin uno propio.
 
 **El histórico.** Cada archivo actualiza su periodo y deja intactos los demás; vive
 en `historico_reservas.json`, junto al notebook. La vista muestra los tres últimos
@@ -168,9 +169,19 @@ histórico local y todo sigue funcionando igual.
 ### Letra grande
 
 La hoja está pensada para leerse sin esfuerzo: la letra más chica es de 13 px y
-la de la matriz, de 16. Arriba hay un control **Normal · Grande · Muy grande**;
-arranca en Grande. Las etiquetas de la cascada crecieron igual, y por eso el
-lienzo del gráfico creció con ellas.
+la de la matriz, de 16. Arriba hay un par de botones **− / +**: cada toque mueve
+un 10 % TODO el tablero de golpe —letras y números, matriz, indicadores, cascada
+y mensajes— entre el 80 % y el 200 %; arranca en 115 %. Las etiquetas de la
+cascada crecieron igual, y por eso el lienzo del gráfico creció con ellas.
+
+### El lila de la casa
+
+Los encabezados de las metodologías van en lila (`#5B3A8C` y `#7355A8`), no en
+azul. El vino de la casa (`#5B1A44`) se queda con la columna de reservas, la fila
+de totales, la diferencia y la base de la cascada; los movimientos de la cascada
+van en el lila claro y lo que baja, en rojo. Sobre los dos tonos oscuros el texto
+blanco tiene contraste de sobra (8.6:1 y 5.8:1); sobre el claro nunca va texto
+blanco, sólo relleno.
 
 ### Los meses los pone y los quita el lector
 
@@ -222,15 +233,20 @@ Las dos vistas traen arriba un interruptor **Dólares / Pesos**. El HTML guarda
 las cifras en las dos monedas y el CSS enseña la que el lector eligió, así que
 sigue sin una línea de JavaScript y se puede mandar por correo tal cual.
 
-Cada corte se convierte con **su propio** tipo de cambio de cierre —diciembre al
-de diciembre, no al de hoy—, que se escribe junto a cada columna en la ventana y
-viaja con el histórico. El que se deje en blanco usa el tipo de cambio general.
+**El ancla del tipo de cambio.** Cada corte viaja con el tipo de cambio de Banco
+de México a SU cierre —el de obligaciones a esa fecha—, que se escribe junto a
+cada columna en la ventana y se guarda en el histórico; el que se deje en blanco
+usa el tipo de cambio general. Pero los pesos que se ven salen de **uno solo** de
+ellos: el ancla, que el HTML trae en un desplegable arriba y que por omisión es
+la del último corte de la vista.
 
-Por eso la variación en pesos no es la variación en dólares multiplicada: lleva
-dentro el efecto cambiario. Con 17.6220 al cierre de marzo y 17.4986 al de junio,
-la diferencia total sube USD 0.42 MM (+10.3 %) pero MXN 6.88 MM (+9.5 %). Los
-indicadores, la matriz, la cascada y los mensajes clave usan todos ese mismo
-criterio, para que ninguna parte de la hoja contradiga a otra.
+Cambiar el ancla vuelve a convertir el tablero entero de golpe: matriz,
+indicadores, cascada, mensajes clave y diferencias por reserva. Así los importes
+en pesos de todos los meses son comparables entre sí y lo que se lee moviéndose es
+la reserva, no el dólar: la variación en pesos es la variación en dólares por el
+ancla, y el porcentaje sale idéntico en las dos monedas (+10.3 % entre marzo y
+junio, sean USD 0.42 MM o MXN 7.38 MM al ancla de junio). Ninguna parte de la
+hoja puede contradecir a otra porque todas leen el mismo número.
 
 ### El gráfico de la vista
 
@@ -250,19 +266,21 @@ para cuando sólo interesa el nivel y no el movimiento.
 **Ver evolución** escribe una página aparte con la diferencia de todos los cortes en
 columnas apiladas por reserva, con el desglose al pasar el cursor y la misma tabla
 debajo. Los colores de serie salen de la paleta de la casa, pero elegidos entre los
-pasos que separan bien para daltonismo (ΔE 25 en deuteranopia, contra los 2.8 del
-vino contra el azul oscuro); aun así van con leyenda y etiqueta directa, para que
-el color nunca sea la única pista.
+pasos que separan bien para daltonismo: el peor par es lila contra vino, ΔE 19 en
+deuteranopia y 20 a vista normal. El tinta oscuro que llevaba siniestros reportados
+se quitaba mal del vino (ΔE 4.6) y se cambió por ocre. Aun así van con leyenda y
+etiqueta directa, para que el color nunca sea la única pista.
 
 ## Comprobación
 
-`verificar.py` ejecuta el bloque sin abrir ventana y contrasta 371 cifras contra
+`verificar.py` ejecuta el bloque sin abrir ventana y contrasta 403 cifras contra
 los valores de control del cierre de junio 2026: los seis cortes concepto por
 concepto, la vista en millones, los indicadores, la estructura del HTML, el ida y
 vuelta completo por la base de datos (contra un SQLite, con el mismo código que
-corre en SQL Server), la página de evolución y el interruptor de moneda —celda por
-celda, con el tipo de cambio de cada cierre, y comprobando que el indicador y el
-mensaje clave digan la misma variación—, la vista plana del servidor y el
+corre en SQL Server), la página de evolución, el interruptor de moneda y el ancla del tipo
+de cambio —celda por celda, comprobando que el indicador y el mensaje clave digan
+la misma variación y que ninguna conversión se quede leyendo el cierre del corte
+que pinta en vez del ancla—, la vista plana del servidor y el
 rechazo de nombres de base inválidos. Arma además la tablita de los actuarios tal
 como la mandan —título del corte, las tres reservas y su Total— en las tres formas
 en que puede venir el importe, y comprueba que el cruce trae la columna estatutaria

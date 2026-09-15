@@ -59,6 +59,10 @@ def igual(etiqueta, obtenido, esperado, tol):
     pruebas += 1
     if obtenido is None and esperado is None:
         return
+    if isinstance(esperado, str) or isinstance(obtenido, str):
+        if obtenido != esperado:
+            fallos.append(f"{etiqueta}: se obtuvo {obtenido!r}, se esperaba {esperado!r}")
+        return
     if obtenido is None or esperado is None or abs(obtenido - esperado) > tol:
         fallos.append(f"{etiqueta}: se obtuvo {obtenido!r}, se esperaba {esperado!r}")
 
@@ -462,6 +466,44 @@ def main(argv):
     pruebas += 1
     if "n2(" not in doc_i or "function cascada" not in doc_i:
         fallos.append("el HTML no trae el motor que lo rehace")
+    for fn in ("function kpis(", "function mensajes(", "function porReserva(",
+               "function matriz("):
+        pruebas += 1
+        if fn not in doc_i:
+            fallos.append(f"el motor del HTML no trae «{fn}»")
+
+    # ---- 7 septies. el ancla del tipo de cambio --------------------------
+    # Toda la hoja se convierte con UN solo tipo de cambio: el del cierre que el
+    # lector ancle arriba. Por omisión, el último corte de la vista.
+    igual("anclas ofrecidas", len(payload_i["anclas"]), 6, 0)
+    igual("ancla de omisión", payload_i["ancla"], ps[-1], 0)
+    igual("opciones del desplegable", doc_i.count("<option value="), 6, 0)
+    for pieza in ('<select id="selancla">', '$("selancla").addEventListener("change"',
+                  "const fxA = () =>", "Banco de México"):
+        pruebas += 1
+        if pieza not in doc_i:
+            fallos.append(f"al ancla del tipo de cambio le falta «{pieza}»")
+    pruebas += 1
+    if doc_i.count(f'value="{ps[-1]}" selected') != 1:
+        fallos.append("el desplegable no viene anclado al último corte de la vista")
+    # el ancla manda sobre el tipo de cambio de cada cierre: ninguna conversión
+    # puede quedarse leyendo el fx del corte que pinta
+    for sobra in ("D.cortes[p].fx", "D.cortes[act].fx", "e.local[c.id], fx"):
+        pruebas += 1
+        if sobra in doc_i:
+            fallos.append(f"quedó una conversión al TC del corte: «{sobra}»")
+
+    # ---- 7 octies. el lila de la casa, no el azul ------------------------
+    # Los encabezados de las metodologías van en lila; el vino queda para la
+    # columna de reservas, los totales de diferencia y la base de la cascada.
+    igual("el lila de los encabezados", BLOQUE["TEAL"], BLOQUE["LILA"], 0)
+    igual("el segundo paso del lila", BLOQUE["TEAL_2"], BLOQUE["LILA_2"], 0)
+    igual("el tercer paso del lila", BLOQUE["TEAL_SOFT"], BLOQUE["LILA_3"], 0)
+    igual("la base de la cascada es vino", payload_i["colorBase"], BLOQUE["PLUM"], 0)
+    for azul in ("#0E7490", "#155E75", "#0891B2", "#06B6D4"):
+        pruebas += 1
+        if azul.lower() in doc_i.lower():
+            fallos.append(f"quedó azul en el tablero: {azul}")
 
     # ---- 7 sexies. la letra, para quien batalla para ver -----------------
     css = BLOQUE["CSS"]
@@ -477,6 +519,12 @@ def main(argv):
     pruebas += 1
     if 'id="zoom"' not in doc_i:
         fallos.append("falta el control de tamaño de letra")
+    # es un menos y un más que mueven TODO el tablero, no tres tamaños sueltos
+    for pieza in ('id="zmenos"', 'id="zmas"', 'id="zval"', 'style.zoom = zoom'):
+        pruebas += 1
+        if pieza not in doc_i:
+            fallos.append(f"al control de tamaño de letra le falta «{pieza}»")
+    igual("botones del control de tamaño", doc_i.count('class="switch zoomctl"'), 1, 0)
 
     # un gráfico más ancho que la hoja tiene que poder desplazarse, no cortarse.
     # Por omisión un hijo de rejilla o de flex vale min-width:auto y crece hasta
@@ -514,7 +562,7 @@ def main(argv):
         if prohibido in doc2:
             fallos.append(f"el interruptor metió algo externo: «{prohibido}»")
 
-    # cada corte convertido con SU tipo de cambio
+    # cada corte viaja con el TC de SU cierre; el ancla decide cuál convierte
     payload = _json.loads(_re.search(r"^const D = (\{.*\});$", doc2, _re.M).group(1))
     for per in ps:
         c = payload["cortes"][per]
@@ -525,23 +573,25 @@ def main(argv):
             igual(f"datos embebidos · {per} {cid} cnsf", c["cnsf"][cid],
                   h.datos[per]["cnsf"][cid], 0.005)
 
-    # el KPI y el mensaje clave no pueden contradecirse
+    # el KPI y el mensaje clave no pueden contradecirse. Con un solo ancla para
+    # toda la hoja, convertir es multiplicar: el porcentaje es el mismo en las
+    # dos monedas y el movimiento que se lee es el de la reserva, no el del dólar.
+    ancla_fx = TC["2026-06-30"]
     v_usd = (h.diferencia("2026-06-30") - h.diferencia("2026-03-31")) / 1e6
-    v_mxn = (h.diferencia("2026-06-30") * TC["2026-06-30"]
-             - h.diferencia("2026-03-31") * TC["2026-03-31"]) / 1e6
-    igual("variación en pesos con el TC de cada cierre", v_mxn, 6.88, 0.005)
+    v_mxn = v_usd * ancla_fx
+    igual("variación en pesos al tipo de cambio ancla", v_mxn, 7.38, 0.005)
     igual("variación en dólares", v_usd, 0.42, 0.005)
     msg_usd = h.mensajes("2026-06-30", "2026-03-31")[2]
-    msg_mxn = h.mensajes("2026-06-30", "2026-03-31", fx=TC["2026-06-30"],
-                         fx_previo=TC["2026-03-31"])[2]
+    msg_mxn = h.mensajes("2026-06-30", "2026-03-31", fx=ancla_fx)[2]
     for etq, msg, cifra in (("dólares", msg_usd, f"USD {v_usd:,.2f} MM"),
                             ("pesos", msg_mxn, f"MXN {v_mxn:,.2f} MM")):
         pruebas += 1
         if cifra not in msg:
             fallos.append(f"el mensaje en {etq} no dice «{cifra}»: {msg[-130:]!r}")
-    pruebas += 1
-    if "+9.5%" not in msg_mxn:
-        fallos.append(f"el porcentaje en pesos debería ser +9.5%: {msg_mxn[-90:]!r}")
+    for etq, msg in (("dólares", msg_usd), ("pesos", msg_mxn)):
+        pruebas += 1
+        if "+10.3%" not in msg:
+            fallos.append(f"el porcentaje en {etq} debería ser +10.3%: {msg[-90:]!r}")
 
     # los gráficos también traen las dos monedas
     pruebas += 1
@@ -552,6 +602,15 @@ def main(argv):
         pruebas += 1
         if cadena not in ev2:
             fallos.append(f"la evolución no trae «{cadena}»")
+    # la página de evolución no lleva desplegable, pero sí el mismo criterio:
+    # un solo tipo de cambio —el del último corte— para toda la página
+    pruebas += 1
+    if "Banco de México al cierre de junio 2026" not in ev2:
+        fallos.append("la evolución no dice con qué ancla convierte")
+    for viejo in ("Tipo de cambio de cierre ·", "al cierre · "):
+        pruebas += 1
+        if viejo in ev2:
+            fallos.append(f"la evolución sigue convirtiendo corte a corte: «{viejo}»")
 
     print(f"{pruebas} comprobaciones · {len(fallos)} fallo(s)")
     if fallos:
