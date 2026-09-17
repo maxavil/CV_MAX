@@ -309,6 +309,19 @@ constituidos en libros, el método estatutario pediría 138*—. A la derecha la
 cifras: las tres reservas y el total en tres columnas, y debajo la línea de todos
 los cierres cargados.
 
+**El tipo de cambio va arriba, no en el pie.** Es de lo que más se pregunta en la
+junta, así que está en la cabecera junto a la fecha del cierre y pegado al
+interruptor de moneda, que es lo que lo vuelve relevante: el número, `MXN/USD`, y
+de dónde salió.
+
+**La línea va a escala de tiempo, no repartida pareja.** Los cortes no caen cada
+mes: entre noviembre y diciembre pasa uno y entre diciembre y marzo pasan tres.
+Repartirlos a la misma distancia ponía diciembre en el 60 % del ancho cuando en el
+tiempo va en el 46 %, y hacía que un salto de un mes se viera igual de largo que
+uno de tres. La posición sale de la fecha. Las etiquetas del eje se colocan sólo
+donde caben —siempre la primera y la última—, así que la línea aguanta doce cortes
+sin que los meses se encimen: lo que se pierde son rótulos, nunca puntos.
+
 **El diseño es deliberadamente austero**, porque el encargo traía una crítica
 concreta: que no se viera «hecho por IA». Eso no es cuestión de gusto, es una
 lista de cosas que se pueden no hacer, y aquí no se hicieron:
@@ -374,7 +387,7 @@ etiqueta directa, para que el color nunca sea la única pista.
 
 ## Comprobación
 
-`verificar.py` ejecuta el bloque sin abrir ventana y contrasta 492 cifras contra
+`verificar.py` ejecuta el bloque sin abrir ventana y contrasta 504 cifras contra
 los valores de control del cierre de junio 2026: los seis cortes concepto por
 concepto, la vista en millones, los indicadores, la estructura del HTML, el ida y
 vuelta completo por la base de datos (contra un SQLite, con el mismo código que
@@ -392,7 +405,8 @@ respaldo lleve todos los cortes, que un corte a medias quede fuera y avisado, y 
 sin ningún corte completo se niegue a dibujar una hoja vacía. De la tarjeta de
 posición comprueba además que no lleve JavaScript y que no traiga ninguno de los
 adornos que se le pidieron quitar: ni `border-radius`, ni `box-shadow`, ni
-degradados, ni más de un control. Arma además la tablita de los actuarios tal
+degradados, ni más de un control; y que la línea coloque cada corte donde le toca
+en el tiempo, contrastando posición por posición contra las fechas de verdad. Arma además la tablita de los actuarios tal
 como la mandan —título del corte, las tres reservas y su Total— en las tres formas
 en que puede venir el importe, y comprueba que el cruce trae la columna estatutaria
 y que el desajuste contra la balanza se avisa, cargando en los dos órdenes.

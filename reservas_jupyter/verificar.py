@@ -881,6 +881,47 @@ def main(argv):
     if "sin diferencia" not in doc_p:
         fallos.append("la tarjeta de posición no dice cuándo las dos coinciden")
 
+    # el tipo de cambio es de lo que más se pregunta: va arriba, no en el pie
+    pruebas += 1
+    cab = doc_p[doc_p.index('class="cab"'):doc_p.index('class="cuerpo"')]
+    if "Tipo de cambio" not in cab or f"{fx_p:,.4f}" not in cab:
+        fallos.append("el tipo de cambio no está en la cabecera de la posición")
+    igual("y no se repite en el pie",
+          doc_p[doc_p.index('class="pie"'):].count(f"{fx_p:,.4f}"), 0, 0)
+
+    # La línea va a ESCALA DE TIEMPO, no repartida pareja: entre noviembre y
+    # diciembre pasa un mes y entre diciembre y marzo pasan tres, y dibujarlos a
+    # la misma distancia haría que un salto de un mes se viera igual que uno de
+    # tres. Se comprueba contra las fechas de verdad.
+    import datetime as _dt
+    serie_svg = doc_p[doc_p.index('aria-label="Diferencia entre metodolog'):]
+    serie_svg = serie_svg[:serie_svg.index("</svg>")]
+    cx = [float(x) for x in _re.findall(r'<circle cx="([\d.]+)"', serie_svg)]
+    igual("un punto por corte completo", len(cx), len(completos_d), 0)
+    dias = [_dt.date.fromisoformat(x).toordinal() for x in completos_d]
+    lapso = dias[-1] - dias[0]
+    ancho = cx[-1] - cx[0]
+    for i, per_ in enumerate(completos_d):
+        esperado = cx[0] + ancho * (dias[i] - dias[0]) / lapso
+        igual(f"la línea pone {per_} donde le toca en el tiempo", cx[i], esperado, 0.6)
+    pruebas += 1
+    # el corte de diciembre, a un mes de noviembre, tiene que quedar MÁS CERCA de
+    # noviembre que marzo, que está a tres
+    i_nov, i_dic, i_mar = (completos_d.index(x) for x in
+                           ("2025-11-30", "2025-12-31", "2026-03-31"))
+    if not (cx[i_dic] - cx[i_nov]) < (cx[i_mar] - cx[i_dic]) / 2:
+        fallos.append("la línea reparte los cortes parejo en vez de por fecha: "
+                      f"nov→dic {cx[i_dic] - cx[i_nov]:.0f} px contra "
+                      f"dic→mar {cx[i_mar] - cx[i_dic]:.0f} px")
+    # con los cortes apretados se caen rótulos, nunca puntos
+    pruebas += 1
+    rot = len(_re.findall(r'letter-spacing="0.8"', serie_svg))
+    if rot >= len(cx):
+        fallos.append("la línea rotula todos los cortes: con doce se encimarían")
+    pruebas += 1
+    if "escala de tiempo" not in doc_p:
+        fallos.append("la posición no explica que la línea va a escala de tiempo")
+
     h_vacio2 = Historico(tmp / "vacio2.json")
     h_vacio2.datos = {"2026-06-30": {"periodo": "2026-06-30", "local": {}, "cnsf": {},
                                      "origen": {}}}

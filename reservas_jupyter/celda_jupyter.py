@@ -3367,20 +3367,36 @@ def _svg_barra_posicion(local: float, cnsf: float, fx: float) -> str:
 
 
 def _svg_serie_posicion(hist: Historico, periodos: "Sequence[str]", fx: float) -> str:
-    """Los cierres cargados, en una línea. Sólo los extremos llevan cifra."""
+    """Los cierres cargados, en una línea, a escala de tiempo real.
+
+    Dos decisiones que no son de adorno:
+
+    · Los cortes NO van repartidos parejo. Entre noviembre y diciembre pasa un
+      mes y entre diciembre y marzo pasan tres; dibujarlos a la misma distancia
+      pone a diciembre en el 60% del ancho cuando en el tiempo va en el 46%, y
+      hace que un salto de un mes se vea igual de largo que uno de tres. La
+      posición sale de la fecha, no del número de corte.
+    · Las etiquetas del eje se colocan sólo donde caben. Siempre el primero y el
+      último; los de en medio, el que quede a más de 62 px del anterior que se
+      haya puesto. Así la línea aguanta doce cortes sin que los meses se encimen:
+      lo que se pierde son rótulos, nunca puntos.
+    """
     ps = [p for p in periodos if hist.completo(p)]
     if len(ps) < 2:
         return ""
     vals = [(hist.diferencia(p) or 0.0) / 1e6 for p in ps]
+    dias = [dt.date.fromisoformat(p).toordinal() for p in ps]
+    lapso = (dias[-1] - dias[0]) or 1
     lo, hi = min(min(vals), 0.0), max(vals)
     W, H, T, B, R = 620, 168, 26, 30, 52
     span = (hi - lo) or 1.0
-    px = lambda i: (W - R) * (i / max(1, len(ps) - 1))          # noqa: E731
+    px = lambda d: (W - R) * ((d - dias[0]) / lapso)            # noqa: E731
     py = lambda v: T + (H - T - B) * (1 - (v - lo) / span)      # noqa: E731
-    pts = [(px(i), py(v)) for i, v in enumerate(vals)]
+    pts = [(px(d), py(v)) for d, v in zip(dias, vals)]
 
     o = [f'<svg viewBox="0 0 {W} {H}" role="img" '
-         f'aria-label="Diferencia entre metodologías en los cierres cargados">']
+         f'aria-label="Diferencia entre metodologías en los cierres cargados, '
+         f'a escala de tiempo">']
     o.append(f'<path d="M {pts[0][0]:.1f} {H - B:.1f} '
              + " ".join(f"L {a:.1f} {b:.1f}" for a, b in pts)
              + f' L {pts[-1][0]:.1f} {H - B:.1f} Z" fill="{POS_ACENTO}" fill-opacity="0.08" />')
@@ -3390,19 +3406,32 @@ def _svg_serie_posicion(hist: Historico, periodos: "Sequence[str]", fx: float) -
         'stroke-linejoin="round" stroke-linecap="round" />')
     o.append(f'<line x1="0" y1="{H - B:.1f}" x2="{W - R}" y2="{H - B:.1f}" '
              f'stroke="{POS_RAYA}" stroke-width="1" />')
+
+    # las etiquetas que caben: primero, último, y los de en medio que no se encimen
+    rotulos, ultimo_x = {0, len(ps) - 1}, None
+    for i in range(1, len(ps) - 1):
+        base = pts[0][0] if ultimo_x is None else ultimo_x
+        if pts[i][0] - base >= 62 and pts[-1][0] - pts[i][0] >= 62:
+            rotulos.add(i)
+            ultimo_x = pts[i][0]
+
     for i, (a, b) in enumerate(pts):
-        if i in (0, len(pts) - 1):
-            o.append(f'<circle cx="{a:.1f}" cy="{b:.1f}" r="3.5" fill="{POS_ACENTO}" '
-                     f'stroke="{POS_PAPEL}" stroke-width="2" />')
-        anc = "start" if i == 0 else ("end" if i == len(pts) - 1 else "middle")
-        o.append(f'<text x="{a:.1f}" y="{H - B + 19:.1f}" text-anchor="{anc}" '
-                 f'fill="{POS_TINTA_3}" font-family="{UI_CSS}" font-size="10.5" '
-                 f'letter-spacing="0.8">{esc(etiqueta_cascada(ps[i]).upper())}</text>')
-    for i, anc, dx in ((0, "start", 0), (len(pts) - 1, "start", 10)):
+        extremo = i in (0, len(pts) - 1)
+        o.append(f'<circle cx="{a:.1f}" cy="{b:.1f}" r="{4 if extremo else 2.5}" '
+                 f'fill="{POS_ACENTO if extremo else POS_NEUTRO}" '
+                 f'stroke="{POS_PAPEL}" stroke-width="{2 if extremo else 1.5}" />')
+        o.append(f'<line x1="{a:.1f}" y1="{H - B:.1f}" x2="{a:.1f}" '
+                 f'y2="{H - B + 5:.1f}" stroke="{POS_RAYA}" stroke-width="1" />')
+        if i in rotulos:
+            anc = "start" if i == 0 else ("end" if i == len(pts) - 1 else "middle")
+            o.append(f'<text x="{a:.1f}" y="{H - B + 19:.1f}" text-anchor="{anc}" '
+                     f'fill="{POS_TINTA_3}" font-family="{UI_CSS}" font-size="10.5" '
+                     f'letter-spacing="0.8">{esc(etiqueta_cascada(ps[i]).upper())}</text>')
+    for i, dx in ((0, 0), (len(pts) - 1, 10)):
         a, b = pts[i]
         for cls, k, sim in (("v-usd", 1.0, "USD"), ("v-mxn", fx, "MXN")):
             o.append(f'<text class="{cls}" x="{a + dx:.1f}" y="{b - 11:.1f}" '
-                     f'text-anchor="{anc}" fill="{POS_TINTA}" font-family="{MONO_CSS}" '
+                     f'text-anchor="start" fill="{POS_TINTA}" font-family="{MONO_CSS}" '
                      f'font-size="13" font-weight="600">'
                      f'{"" if i else sim + " "}{vals[i] * k:,.2f}</text>')
     o.append("</svg>")
@@ -3428,15 +3457,31 @@ p{margin:0}
       display:flex;flex-direction:column}
 
 /* ---- cabecera: una línea fina y ya ---- */
-.cab{display:flex;align-items:baseline;justify-content:space-between;gap:24px;
+.cab{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;
      padding:26px 0 12px;border-bottom:2px solid var(--acento);flex-wrap:wrap}
-.cab h1{font-size:15px;letter-spacing:.24em;text-transform:uppercase;color:var(--acento)}
-.cab .der{display:flex;align-items:baseline;gap:20px}
-.cab .corte{font-size:14px;color:var(--tinta2);font-family:var(--mono)}
+.cab h1{font-size:15px;letter-spacing:.24em;text-transform:uppercase;color:var(--acento);
+        padding-bottom:3px}
+.cab .der{display:flex;align-items:flex-end;gap:26px}
+/* El tipo de cambio no es letra chica del pie: es de lo que más se pregunta en
+   la junta, así que va arriba, junto a la fecha del cierre y pegado al
+   interruptor de moneda, que es lo que lo vuelve relevante. */
+.cab .dato{display:flex;flex-direction:column;gap:1px;text-align:right}
+.cab .dato .k{font-size:9.5px;letter-spacing:.15em;text-transform:uppercase;
+              color:var(--tinta3);font-weight:600}
+.cab .dato .v{font-size:15px;color:var(--tinta);font-family:var(--mono)}
+.cab .dato.tc .v{color:var(--acento);font-weight:600}
+.cab .dato .v em{font-style:normal;font-size:11.5px;color:var(--tinta3);font-weight:400}
+.cab .dato .p{font-size:10.5px;color:var(--tinta3)}
+.cab .dato+.dato{border-left:1px solid var(--raya);padding-left:26px}
+@media (max-width:880px){
+  .cab .der{flex-wrap:wrap;gap:16px}
+  .cab .dato+.dato{border-left:0;padding-left:0}
+}
 /* el interruptor de moneda va como texto, no como pastilla: es el único control
    de la página y no debe parecer un tablero */
-.mon label{font-family:var(--mono);font-size:13px;color:var(--tinta3);cursor:pointer;
-           padding-bottom:2px;border-bottom:2px solid transparent;user-select:none}
+.mon{padding-bottom:2px}
+.mon label{font-family:var(--mono);font-size:14px;color:var(--tinta3);cursor:pointer;
+           padding-bottom:3px;border-bottom:2px solid transparent;user-select:none}
 .mon span{color:var(--raya);margin:0 7px;font-family:var(--mono);font-size:13px}
 #m-usd:checked ~ .hoja label[for=m-usd],
 #m-mxn:checked ~ .hoja label[for=m-mxn]{color:var(--acento);border-bottom-color:var(--acento)}
@@ -3495,12 +3540,14 @@ table.cifras tr.total th,table.cifras tr.total td{border-top:1px solid var(--tin
 table.cifras tr.total td.dif{color:var(--acento)}
 table.cifras td.cero{color:var(--tinta3);font-weight:400}
 
-.serie{margin-top:26px;padding-top:20px;border-top:1px solid var(--raya)}
+.serie{margin-top:20px;padding-top:16px;border-top:1px solid var(--raya)}
 .serie .rot{margin-bottom:10px}
+.escala{margin-top:9px;font-size:11.5px;color:var(--tinta3);line-height:1.45;
+        max-width:64ch}
 
 /* ---- pie: letra chica en tres columnas ---- */
 .pie{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:0 34px;
-     margin-top:26px;padding-top:14px;border-top:1px solid var(--raya);
+     margin-top:18px;padding-top:12px;border-top:1px solid var(--raya);
      font-size:12.5px;color:var(--tinta3);line-height:1.5}
 .pie b{display:block;font-size:10px;letter-spacing:.14em;text-transform:uppercase;
        color:var(--tinta2);margin-bottom:3px;font-weight:600}
@@ -3597,9 +3644,17 @@ def construir_html_posicion(hist: Historico, periodos: "Sequence[str] | None" = 
               f'<td class="dif">{dual_mm(brecha, ancla)}</td></tr>')
 
     serie = _svg_serie_posicion(hist, completos, ancla)
+    meses = 0
+    if len(completos) > 1:
+        meses = round((dt.date.fromisoformat(completos[-1]).toordinal()
+                       - dt.date.fromisoformat(completos[0]).toordinal()) / 30.44)
     html_serie = ("" if not serie else
                   f'<div class="serie"><p class="rot">La diferencia en los '
-                  f'{len(completos)} cierres cargados</p>{serie}</div>')
+                  f'{len(completos)} cierres cargados</p>{serie}'
+                  f'<p class="escala">Los cortes van a escala de tiempo: la '
+                  f'distancia entre dos puntos son los meses que pasaron entre '
+                  f'ellos, no un espacio parejo. {meses} meses de punta a '
+                  f'punta.</p></div>')
 
     avisos = [p for p in completos if hist.datos.get(p, {}).get("aviso")]
     html_banda = ("" if not avisos else
@@ -3627,7 +3682,15 @@ def construir_html_posicion(hist: Historico, periodos: "Sequence[str] | None" = 
   <header class="cab">
     <h1>Reservas técnicas QES</h1>
     <div class="der">
-      <span class="corte">Cierre al {esc(etiqueta_periodo(act))}</span>
+      <div class="dato">
+        <span class="k">Cierre</span>
+        <span class="v">{esc(etiqueta_periodo(act))}</span>
+      </div>
+      <div class="dato tc">
+        <span class="k">Tipo de cambio</span>
+        <span class="v">{ancla:,.4f} <em>MXN/USD</em></span>
+        <span class="p">Banxico al cierre · convierte toda la hoja</span>
+      </div>
       <span class="mon"><label for="m-usd">USD</label><span>·</span><label
         for="m-mxn">MXN</label></span>
     </div>
@@ -3659,7 +3722,6 @@ def construir_html_posicion(hist: Historico, periodos: "Sequence[str] | None" = 
       constituir por encima de la Metodología local, que es la que está en libros.</div>
     <div><b>Nota relevante</b>{esc(nota)}</div>
     <div><b>Origen</b><span class="m">{esc(fuentes)}<br />
-      {ancla:,.4f} MXN/USD · Banxico al cierre<br />
       armado en local {sello}</span></div>
   </footer>
 </div>
