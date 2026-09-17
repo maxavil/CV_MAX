@@ -31,8 +31,9 @@ reservas_jupyter/
    tecléalo. Si quieres más columnas, marca los cortes adicionales de abajo.
 6. Pica **Procesar**. Se escribe `vista_reservas_AAAA-MM-DD.html` junto al
    notebook y se abre en el navegador. **Ver evolución** escribe
-   `evolucion_diferencia.html` con la diferencia mes con mes, y **Vista dirección**
-   escribe `brecha_direccion.html`, la hoja de una página para el comité.
+   `evolucion_diferencia.html` con la diferencia mes con mes, **Vista dirección**
+   escribe `brecha_direccion.html`, la hoja de una página para el comité, y
+   **Posición** escribe `posicion_reservas.html`, la tarjeta de una pantalla.
 
 La celda queda ocupada con `[*]` mientras la ventana está abierta: es el
 `mainloop()` de Tk y es normal. Se libera al cerrarla.
@@ -294,6 +295,38 @@ va en rojo. Cuando el gráfico ya no cabe de un vistazo, se desplaza de lado den
 de su panel y lo dice al pie; no se comprime ni se corta. El desplegable «Gráfico de la vista» ofrece además columnas por corte,
 para cuando sólo interesa el nivel y no el movimiento.
 
+### Tarjeta de posición · una pantalla, sin bajar
+
+**Posición** escribe `posicion_reservas.html`. Es lo más corto que se puede
+entregar: la posición del mes en **una sola pantalla**, sin barra de
+desplazamiento y sin un solo botón que picar salvo el cambio de moneda. Se abre,
+se lee en diez segundos y se cierra. Al imprimirla cabe en **una** A4 apaisada.
+
+A la izquierda el veredicto: la diferencia por constituir, el porcentaje sobre la
+base en libros, el movimiento contra el cierre anterior, la barra de lo
+constituido contra lo que faltaría, y una lectura en palabras —*por cada 100
+constituidos en libros, el método estatutario pediría 138*—. A la derecha las
+cifras: las tres reservas y el total en tres columnas, y debajo la línea de todos
+los cierres cargados.
+
+**El diseño es deliberadamente austero**, porque el encargo traía una crítica
+concreta: que no se viera «hecho por IA». Eso no es cuestión de gusto, es una
+lista de cosas que se pueden no hacer, y aquí no se hicieron:
+
+- **Ni una esquina redondeada ni una sombra** en toda la hoja. La estructura la
+  dan las líneas de un punto y el aire, como en un estado financiero impreso.
+- **Ningún degradado, ningún emoji, ningún icono, ninguna pastilla de color.**
+- **Nada de tres tarjetas iguales en fila.** La rejilla es asimétrica: una columna
+  angosta para el veredicto y una ancha para las cifras, que es como se compagina
+  un documento y no como se rellena un tablero.
+- **Una sola familia tipográfica y cuatro tamaños**, con versalitas espaciadas
+  para las etiquetas. Los números mandan; el resto se quita de en medio.
+- **Dos tintas y un acento.** El vino sólo aparece en lo que hay que mirar.
+- El interruptor de moneda va como texto —`USD · MXN`—, no como pastilla: es el
+  único control de la página y no debe parecer un tablero.
+
+Sin una línea de JavaScript: el cambio de moneda es CSS, como en las otras vistas.
+
 ### Vista dirección · la hoja de una página
 
 **Vista dirección** escribe `brecha_direccion.html`: no es el tablero con otro
@@ -341,7 +374,7 @@ etiqueta directa, para que el color nunca sea la única pista.
 
 ## Comprobación
 
-`verificar.py` ejecuta el bloque sin abrir ventana y contrasta 465 cifras contra
+`verificar.py` ejecuta el bloque sin abrir ventana y contrasta 492 cifras contra
 los valores de control del cierre de junio 2026: los seis cortes concepto por
 concepto, la vista en millones, los indicadores, la estructura del HTML, el ida y
 vuelta completo por la base de datos (contra un SQLite, con el mismo código que
@@ -356,7 +389,10 @@ la serie sin dato, la red caída, el relevo entre varios tokens y que no se pise
 tecleado a mano. De la hoja de dirección comprueba que haya una sola cifra heroica,
 que las cifras que dice sean las del histórico en las dos monedas, que la tabla de
 respaldo lleve todos los cortes, que un corte a medias quede fuera y avisado, y que
-sin ningún corte completo se niegue a dibujar una hoja vacía. Arma además la tablita de los actuarios tal
+sin ningún corte completo se niegue a dibujar una hoja vacía. De la tarjeta de
+posición comprueba además que no lleve JavaScript y que no traiga ninguno de los
+adornos que se le pidieron quitar: ni `border-radius`, ni `box-shadow`, ni
+degradados, ni más de un control. Arma además la tablita de los actuarios tal
 como la mandan —título del corte, las tres reservas y su Total— en las tres formas
 en que puede venir el importe, y comprueba que el cruce trae la columna estatutaria
 y que el desajuste contra la balanza se avisa, cargando en los dos órdenes.

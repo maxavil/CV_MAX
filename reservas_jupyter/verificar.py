@@ -833,6 +833,69 @@ def main(argv):
     if not ruta_d.exists() or ruta_d.stat().st_size < 10_000:
         fallos.append("escribir_direccion no dejó la hoja en disco")
 
+    # ---- 9 bis. la tarjeta de posición -----------------------------------
+    # Una pantalla, sin bajar y sin nada que picar salvo la moneda. Lo que se
+    # comprueba aquí es justo eso: que no lleve JavaScript, que no traiga los
+    # adornos que se le pidieron quitar, y que las cifras sean las del histórico.
+    construir_posicion = BLOQUE["construir_html_posicion"]
+    doc_p = construir_posicion(h, h.periodos())
+
+    for cadena in ("Diferencia por constituir", 'class="grande"', 'class="cifras"',
+                   "Por cada", "FALTA CONSTITUIR", "@media print"):
+        pruebas += 1
+        if cadena not in doc_p:
+            fallos.append(f"a la tarjeta de posición le falta «{cadena}»")
+    for prohibido in ("http://", "https://", "<link", " src=", "<script"):
+        pruebas += 1
+        if prohibido in doc_p:
+            fallos.append(f"la tarjeta de posición metió «{prohibido}»")
+    # el encargo era explícito: que no se vea «hecha por IA». Eso son cosas
+    # concretas que no deben aparecer.
+    for adorno, porque in (("border-radius", "esquinas redondeadas"),
+                           ("box-shadow", "sombras"),
+                           ("linear-gradient", "degradados"),
+                           ("radial-gradient", "degradados")):
+        pruebas += 1
+        if adorno in doc_p:
+            fallos.append(f"la tarjeta de posición trae {porque}: «{adorno}»")
+    igual("un solo control en toda la hoja: la moneda",
+          doc_p.count('<input type="radio"'), 2, 0)
+    igual("una sola cifra grande", doc_p.count('<p class="grande">'), 1, 0)
+
+    act_p = [x for x in h.periodos() if h.completo(x)][-1]
+    fx_p = h.fx(act_p)
+    loc_p, cn_p = h.total(act_p, "local"), h.total(act_p, "cnsf")
+    for etq, v in (("brecha", cn_p - loc_p), ("en libros", loc_p), ("estatutario", cn_p)):
+        pruebas += 1
+        if f"{v / 1e6:,.2f}" not in doc_p:
+            fallos.append(f"la tarjeta de posición no dice la cifra de {etq}")
+        pruebas += 1
+        if f"{v * fx_p / 1e6:,.2f}" not in doc_p:
+            fallos.append(f"la tarjeta de posición no trae en pesos la cifra de {etq}")
+    pruebas += 1
+    if f"{100 + (cn_p - loc_p) / loc_p * 100:,.0f}" not in doc_p:
+        fallos.append("la tarjeta de posición no trae la lectura «por cada 100»")
+    # una reserva donde las dos metodologías coinciden se dice con palabras, no
+    # con un cero que se lee como «esta reserva vale cero»
+    pruebas += 1
+    if "sin diferencia" not in doc_p:
+        fallos.append("la tarjeta de posición no dice cuándo las dos coinciden")
+
+    h_vacio2 = Historico(tmp / "vacio2.json")
+    h_vacio2.datos = {"2026-06-30": {"periodo": "2026-06-30", "local": {}, "cnsf": {},
+                                     "origen": {}}}
+    pruebas += 1
+    try:
+        construir_posicion(h_vacio2)
+        fallos.append("sin cortes completos la tarjeta de posición debería negarse")
+    except ValueError:
+        pass
+
+    ruta_p = BLOQUE["escribir_posicion"](h, destino=tmp / "pos.html", abrir=False)
+    pruebas += 1
+    if not ruta_p.exists() or ruta_p.stat().st_size < 5_000:
+        fallos.append("escribir_posicion no dejó la tarjeta en disco")
+
     print(f"{pruebas} comprobaciones · {len(fallos)} fallo(s)")
     if fallos:
         for f in fallos:

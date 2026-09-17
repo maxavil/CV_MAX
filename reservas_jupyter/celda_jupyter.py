@@ -3303,6 +3303,389 @@ def escribir_direccion(hist: Historico, destino: "str | Path | None" = None,
 
 
 # -----------------------------------------------------------------------------
+# 7 quater. La tarjeta de posición: una pantalla, sin bajar, sin picar nada
+# -----------------------------------------------------------------------------
+#
+# Hay tres documentos antes de éste y ninguno sirve para lo que pide un director
+# que abre el correo entre dos juntas: el tablero es para trabajar, la evolución
+# es para seguir la tendencia y la hoja de dirección es para sustentar una
+# decisión —cuatro secciones, se lee sentado—. Esto es otra cosa: la posición
+# del mes en una sola pantalla, sin barra de desplazamiento y sin un solo botón
+# que picar. Se abre, se lee en diez segundos y se cierra.
+#
+# El encargo trae además una crítica de diseño explícita: que no se vea «hecho
+# por IA». Eso no es una queja de gusto, es una lista de cosas concretas que se
+# pueden no hacer:
+#
+#   · Nada de tarjetas flotando con sombra y esquinas redondeadas. La estructura
+#     la dan las líneas de un punto y el aire, como en un estado financiero
+#     impreso: no hay un solo border-radius ni un solo box-shadow en la hoja.
+#   · Nada de degradados, ni de emojis, ni de iconos, ni de pastillas de color.
+#   · Nada de tres tarjetas iguales en fila. La rejilla es asimétrica —una
+#     columna angosta para el veredicto y una ancha para las cifras—, que es como
+#     se compagina un documento y no como se rellena un tablero.
+#   · Una sola familia tipográfica, cuatro tamaños, versalitas espaciadas para
+#     las etiquetas. Los números mandan; el resto se quita de en medio.
+#   · Dos tintas y un acento. El vino sólo aparece en lo que hay que mirar.
+#
+# Y el interruptor de moneda va como texto —«USD · MXN»—, no como pastilla: es
+# el único control de toda la página y no debe parecer un tablero.
+
+POS_PAPEL, POS_TINTA = "#F7F4F2", "#211B24"
+POS_TINTA_2, POS_TINTA_3 = "#5A5160", "#8C8090"
+POS_RAYA, POS_RAYA_2 = "#D8D1D6", "#EDE8EB"
+POS_NEUTRO = "#8C8090"     # lo que ya está en libros
+POS_ACENTO = PLUM          # lo que faltaría constituir
+
+
+def _svg_barra_posicion(local: float, cnsf: float, fx: float) -> str:
+    """Una barra, dos tramos: lo constituido y lo que faltaría.
+
+    Es la comparación entera en un solo objeto. No lleva eje porque no hace falta
+    leer valores de una regla: los dos números van escritos debajo, en los
+    extremos, donde siempre caben.
+    """
+    W, H, alto, hueco = 286, 84, 34, 2
+    total = max(cnsf, 1e-9)
+    xl = (W - hueco) * (local / total)
+    o = [f'<svg viewBox="0 0 {W} {H}" role="img" aria-label="Reserva en libros '
+         f'frente a la que resultaría del método estatutario">']
+    o.append(f'<rect x="0" y="0" width="{xl:.1f}" height="{alto}" fill="{POS_NEUTRO}" />')
+    o.append(f'<rect x="{xl + hueco:.1f}" y="0" width="{max(0.0, W - xl - hueco):.1f}" '
+             f'height="{alto}" fill="{POS_ACENTO}" />')
+    for anc, x, etq, val in (("start", 0, "En libros", local),
+                             ("end", W, "Falta constituir", cnsf - local)):
+        o.append(f'<text x="{x}" y="{alto + 21}" text-anchor="{anc}" fill="{POS_TINTA_3}" '
+                 f'font-family="{UI_CSS}" font-size="10" letter-spacing="1.3" '
+                 f'font-weight="600">{esc(etq.upper())}</text>')
+        for cls, k, sim in (("v-usd", 1.0, "USD"), ("v-mxn", fx, "MXN")):
+            o.append(f'<text class="{cls}" x="{x}" y="{alto + 43}" text-anchor="{anc}" '
+                     f'fill="{POS_TINTA}" font-family="{MONO_CSS}" font-size="16" '
+                     f'font-weight="600">{sim} {val * k / 1e6:,.2f} M</text>')
+    o.append("</svg>")
+    return "\n".join(o)
+
+
+def _svg_serie_posicion(hist: Historico, periodos: "Sequence[str]", fx: float) -> str:
+    """Los cierres cargados, en una línea. Sólo los extremos llevan cifra."""
+    ps = [p for p in periodos if hist.completo(p)]
+    if len(ps) < 2:
+        return ""
+    vals = [(hist.diferencia(p) or 0.0) / 1e6 for p in ps]
+    lo, hi = min(min(vals), 0.0), max(vals)
+    W, H, T, B, R = 620, 168, 26, 30, 52
+    span = (hi - lo) or 1.0
+    px = lambda i: (W - R) * (i / max(1, len(ps) - 1))          # noqa: E731
+    py = lambda v: T + (H - T - B) * (1 - (v - lo) / span)      # noqa: E731
+    pts = [(px(i), py(v)) for i, v in enumerate(vals)]
+
+    o = [f'<svg viewBox="0 0 {W} {H}" role="img" '
+         f'aria-label="Diferencia entre metodologías en los cierres cargados">']
+    o.append(f'<path d="M {pts[0][0]:.1f} {H - B:.1f} '
+             + " ".join(f"L {a:.1f} {b:.1f}" for a, b in pts)
+             + f' L {pts[-1][0]:.1f} {H - B:.1f} Z" fill="{POS_ACENTO}" fill-opacity="0.08" />')
+    o.append('<path d="' + " ".join(
+        ("M " if k == 0 else "L ") + f"{a:.1f} {b:.1f}" for k, (a, b) in enumerate(pts))
+        + f'" fill="none" stroke="{POS_ACENTO}" stroke-width="2" '
+        'stroke-linejoin="round" stroke-linecap="round" />')
+    o.append(f'<line x1="0" y1="{H - B:.1f}" x2="{W - R}" y2="{H - B:.1f}" '
+             f'stroke="{POS_RAYA}" stroke-width="1" />')
+    for i, (a, b) in enumerate(pts):
+        if i in (0, len(pts) - 1):
+            o.append(f'<circle cx="{a:.1f}" cy="{b:.1f}" r="3.5" fill="{POS_ACENTO}" '
+                     f'stroke="{POS_PAPEL}" stroke-width="2" />')
+        anc = "start" if i == 0 else ("end" if i == len(pts) - 1 else "middle")
+        o.append(f'<text x="{a:.1f}" y="{H - B + 19:.1f}" text-anchor="{anc}" '
+                 f'fill="{POS_TINTA_3}" font-family="{UI_CSS}" font-size="10.5" '
+                 f'letter-spacing="0.8">{esc(etiqueta_cascada(ps[i]).upper())}</text>')
+    for i, anc, dx in ((0, "start", 0), (len(pts) - 1, "start", 10)):
+        a, b = pts[i]
+        for cls, k, sim in (("v-usd", 1.0, "USD"), ("v-mxn", fx, "MXN")):
+            o.append(f'<text class="{cls}" x="{a + dx:.1f}" y="{b - 11:.1f}" '
+                     f'text-anchor="{anc}" fill="{POS_TINTA}" font-family="{MONO_CSS}" '
+                     f'font-size="13" font-weight="600">'
+                     f'{"" if i else sim + " "}{vals[i] * k:,.2f}</text>')
+    o.append("</svg>")
+    return "\n".join(o)
+
+
+CSS_POSICION = """
+:root{
+  --papel:%(papel)s; --tinta:%(tinta)s; --tinta2:%(tinta2)s; --tinta3:%(tinta3)s;
+  --raya:%(raya)s; --raya2:%(raya2)s; --acento:%(acento)s; --neutro:%(neutro)s;
+  --aviso:%(aviso)s;
+  --sans:%(ui)s; --mono:%(mono)s;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--papel);color:var(--tinta);font-family:var(--sans);
+     font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased}
+h1,h2,h3{margin:0;font-weight:600}
+p{margin:0}
+/* Ni una esquina redondeada ni una sombra en toda la hoja: la estructura la dan
+   las líneas de un punto y el aire, como en un estado financiero impreso. */
+
+.hoja{max-width:1120px;margin:0 auto;padding:0 40px 26px;min-height:100vh;
+      display:flex;flex-direction:column}
+
+/* ---- cabecera: una línea fina y ya ---- */
+.cab{display:flex;align-items:baseline;justify-content:space-between;gap:24px;
+     padding:26px 0 12px;border-bottom:2px solid var(--acento);flex-wrap:wrap}
+.cab h1{font-size:15px;letter-spacing:.24em;text-transform:uppercase;color:var(--acento)}
+.cab .der{display:flex;align-items:baseline;gap:20px}
+.cab .corte{font-size:14px;color:var(--tinta2);font-family:var(--mono)}
+/* el interruptor de moneda va como texto, no como pastilla: es el único control
+   de la página y no debe parecer un tablero */
+.mon label{font-family:var(--mono);font-size:13px;color:var(--tinta3);cursor:pointer;
+           padding-bottom:2px;border-bottom:2px solid transparent;user-select:none}
+.mon span{color:var(--raya);margin:0 7px;font-family:var(--mono);font-size:13px}
+#m-usd:checked ~ .hoja label[for=m-usd],
+#m-mxn:checked ~ .hoja label[for=m-mxn]{color:var(--acento);border-bottom-color:var(--acento)}
+input.sw{position:absolute;width:0;height:0;opacity:0;pointer-events:none}
+.v-mxn{display:none}
+#m-mxn:checked ~ .hoja .v-usd{display:none}
+#m-mxn:checked ~ .hoja .v-mxn{display:inline}
+#m-mxn:checked ~ .hoja text.v-mxn{display:inline}
+
+/* ---- el cuerpo: rejilla asimétrica, no tres tarjetas iguales ---- */
+.cuerpo{display:grid;grid-template-columns:minmax(0,348px) minmax(0,1fr);
+        gap:0 44px;flex:1;padding-top:26px}
+.izq{border-right:1px solid var(--raya);padding-right:44px;min-width:0}
+.der{min-width:0}
+@media (max-width:880px){
+  .cuerpo{grid-template-columns:1fr;gap:26px}
+  .izq{border-right:0;padding-right:0;border-bottom:1px solid var(--raya);padding-bottom:22px}
+}
+
+.rot{font-size:11px;letter-spacing:.17em;text-transform:uppercase;color:var(--tinta3);
+     font-weight:600}
+.grande{font-size:62px;line-height:1;letter-spacing:-.035em;color:var(--acento);
+        font-weight:600;margin-top:9px}
+.grande .u{font-size:22px;letter-spacing:0;color:var(--tinta2);margin-left:4px}
+.grande .sim{font-size:19px;letter-spacing:.09em;color:var(--tinta2);
+             margin-right:9px;vertical-align:.62em;font-weight:600}
+.apoyo{display:flex;align-items:baseline;gap:12px;padding:11px 0;
+       border-top:1px solid var(--raya2)}
+.apoyo:first-of-type{margin-top:22px}
+.apoyo .n{font-family:var(--mono);font-size:21px;font-weight:600;color:var(--tinta);
+          white-space:nowrap}
+.apoyo .q{font-size:13.5px;color:var(--tinta2);line-height:1.35}
+
+.barra{margin-top:30px}
+.lectura{margin-top:20px;padding-top:14px;border-top:1px solid var(--raya2);
+         font-size:14px;color:var(--tinta2);line-height:1.5}
+.lectura b{font-family:var(--mono);font-size:16px;color:var(--acento);font-weight:600}
+.barra svg,.serie svg{width:100%%;height:auto;display:block}
+
+/* ---- la tabla: sin caja, sin fondo, sólo líneas ---- */
+table.cifras{border-collapse:collapse;width:100%%;font-variant-numeric:tabular-nums}
+table.cifras th,table.cifras td{padding:15px 0;border-bottom:1px solid var(--raya2);
+                                text-align:right}
+table.cifras thead th{font-size:10.5px;letter-spacing:.13em;text-transform:uppercase;
+                      color:var(--tinta3);border-bottom:1px solid var(--raya);
+                      padding-bottom:8px;font-weight:600}
+table.cifras thead th:first-child,table.cifras tbody th{text-align:left}
+table.cifras tbody th{font-weight:400;color:var(--tinta);font-size:14.5px;
+                      padding-right:14px}
+table.cifras tbody td{font-family:var(--mono);font-size:15.5px;color:var(--tinta2);
+                      padding-left:20px;white-space:nowrap}
+table.cifras td.dif{color:var(--acento);font-weight:600}
+table.cifras tr.total th{font-weight:600}
+table.cifras tr.total th,table.cifras tr.total td{border-top:1px solid var(--tinta);
+       border-bottom:0;padding-top:12px;font-size:16.5px;color:var(--tinta)}
+table.cifras tr.total td.dif{color:var(--acento)}
+table.cifras td.cero{color:var(--tinta3);font-weight:400}
+
+.serie{margin-top:26px;padding-top:20px;border-top:1px solid var(--raya)}
+.serie .rot{margin-bottom:10px}
+
+/* ---- pie: letra chica en tres columnas ---- */
+.pie{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:0 34px;
+     margin-top:26px;padding-top:14px;border-top:1px solid var(--raya);
+     font-size:12.5px;color:var(--tinta3);line-height:1.5}
+.pie b{display:block;font-size:10px;letter-spacing:.14em;text-transform:uppercase;
+       color:var(--tinta2);margin-bottom:3px;font-weight:600}
+.pie .m{font-family:var(--mono);font-size:11.5px}
+@media (max-width:880px){.pie{grid-template-columns:1fr;gap:14px}}
+
+.banda{margin-top:18px;padding:9px 13px;border-left:3px solid var(--aviso);
+       background:#FBF5E9;font-size:13px;color:#6B4A0A}
+
+/* Al imprimir se aprieta el interlineado para que la hoja quepa en UNA A4
+   apaisada: con las medidas de pantalla se desbordaban dos renglones del pie
+   a una segunda página, que para un documento de una sola hoja es un defecto. */
+@media print{
+  @page{size:A4 landscape;margin:10mm}
+  body{background:#fff;font-size:14px}
+  .hoja{min-height:0;max-width:none;padding:0}
+  .mon{display:none}
+  .cab{padding:0 0 8px}
+  .cuerpo{padding-top:16px;gap:0 32px}
+  .izq{padding-right:32px}
+  .grande{font-size:48px;margin-top:6px}
+  .apoyo{padding:8px 0}
+  .apoyo:first-of-type{margin-top:14px}
+  .barra{margin-top:18px}
+  .lectura{margin-top:14px;padding-top:10px}
+  table.cifras th,table.cifras td{padding:9px 0}
+  .serie{margin-top:16px;padding-top:12px}
+  .pie{margin-top:14px;padding-top:10px}
+}
+""" % {
+    "papel": POS_PAPEL, "tinta": POS_TINTA, "tinta2": POS_TINTA_2,
+    "tinta3": POS_TINTA_3, "raya": POS_RAYA, "raya2": POS_RAYA_2,
+    "acento": POS_ACENTO, "neutro": POS_NEUTRO, "aviso": WARN,
+    "ui": UI_CSS, "mono": MONO_CSS,
+}
+
+
+def construir_html_posicion(hist: Historico, periodos: "Sequence[str] | None" = None,
+                            fx: float = FX_DEFAULT,
+                            nota: str = NOTA_RELEVANTE) -> str:
+    """La tarjeta de posición: el mes entero en una pantalla, sin bajar.
+
+    Toma el último corte completo para las cifras y todos los demás para la
+    línea de abajo. No lleva controles salvo el cambio de moneda, no lleva
+    JavaScript y cabe en una hoja A4 apaisada al imprimirla.
+    """
+    ps = list(periodos) if periodos else hist.periodos()
+    completos = [p for p in ps if hist.completo(p)]
+    if not completos:
+        raise ValueError("Ningún corte tiene las dos fuentes cargadas: no hay "
+                         "posición que mostrar.")
+    act = completos[-1]
+    prev = completos[-2] if len(completos) > 1 else None
+    ancla = hist.fx(act, fx)
+
+    loc, cn = hist.total(act, "local"), hist.total(act, "cnsf")
+    brecha = cn - loc
+    sobre = brecha / loc * 100 if loc else 0.0
+
+    # La moneda va de rótulo chico y no dentro de la cifra: «MXN 88.71» a 62 px
+    # no cabe en la columna y se partiría en dos renglones.
+    hero = dual(f'<span class="sim">USD</span>{brecha / 1e6:,.2f}',
+                f'<span class="sim">MXN</span>{brecha * ancla / 1e6:,.2f}')
+
+    # --- las dos cifras de apoyo -------------------------------------------
+    apoyos = [(f"{sobre:,.1f}%", "más de lo que está constituido en libros")]
+    if prev:
+        d0 = hist.diferencia(prev) or 0.0
+        v = brecha - d0
+        apoyos.append((
+            dual(f'{"+" if v >= 0 else "−"}USD {abs(v) / 1e6:,.2f}',
+                 f'{"+" if v >= 0 else "−"}MXN {abs(v) * ancla / 1e6:,.2f}'),
+            f'{"más" if v >= 0 else "menos"} que al cierre de '
+            f'{etiqueta_corta(prev).lower()}'))
+    else:
+        apoyos.append(("—", "primer corte completo del histórico"))
+    html_apoyos = "".join(
+        f'<div class="apoyo"><span class="n">{n}</span>'
+        f'<span class="q">{esc(q) if "<" not in str(q) else q}</span></div>'
+        for n, q in apoyos)
+
+    # --- la tabla -----------------------------------------------------------
+    filas = ""
+    for c in CONCEPTOS:
+        l_, c_ = hist.datos[act]["local"].get(c.id), hist.datos[act]["cnsf"].get(c.id)
+        d = None if l_ is None or c_ is None else c_ - l_
+        cero = d is not None and abs(d) < 5000
+        filas += (f'<tr><th>{esc(c.label.replace("Reserva de ", ""))}</th>'
+                  f"<td>{dual_mm(l_, ancla)}</td><td>{dual_mm(c_, ancla)}</td>"
+                  f'<td class="dif{" cero" if cero else ""}">'
+                  f'{"sin diferencia" if cero else dual_mm(d, ancla)}</td></tr>')
+    filas += (f'<tr class="total"><th>Total reservas</th>'
+              f"<td>{dual_mm(loc, ancla)}</td><td>{dual_mm(cn, ancla)}</td>"
+              f'<td class="dif">{dual_mm(brecha, ancla)}</td></tr>')
+
+    serie = _svg_serie_posicion(hist, completos, ancla)
+    html_serie = ("" if not serie else
+                  f'<div class="serie"><p class="rot">La diferencia en los '
+                  f'{len(completos)} cierres cargados</p>{serie}</div>')
+
+    avisos = [p for p in completos if hist.datos.get(p, {}).get("aviso")]
+    html_banda = ("" if not avisos else
+                  '<div class="banda"><b>Revisar la metodología local.</b> '
+                  + esc("; ".join(f"{etiqueta_corta(p)}: {hist.datos[p]['aviso']}"
+                                  for p in avisos)) + "</div>")
+
+    orig = hist.datos[act].get("origen", {})
+    fuentes = " · ".join(x for x in (orig.get("local"), orig.get("cnsf")) if x) or "n/d"
+    sello = dt.datetime.now().strftime("%d/%m/%Y %H:%M")
+
+    return f"""<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Posición de reservas · QES · {esc(etiqueta_corta(act))}</title>
+<style>{CSS_POSICION}</style>
+</head>
+<body>
+<input type="radio" name="moneda" id="m-usd" class="sw" checked />
+<input type="radio" name="moneda" id="m-mxn" class="sw" />
+<div class="hoja">
+
+  <header class="cab">
+    <h1>Reservas técnicas QES</h1>
+    <div class="der">
+      <span class="corte">Cierre al {esc(etiqueta_periodo(act))}</span>
+      <span class="mon"><label for="m-usd">USD</label><span>·</span><label
+        for="m-mxn">MXN</label></span>
+    </div>
+  </header>
+
+  <main class="cuerpo">
+    <div class="izq">
+      <p class="rot">Diferencia por constituir</p>
+      <p class="grande">{hero}<span class="u">M</span></p>
+      {html_apoyos}
+      <div class="barra">{_svg_barra_posicion(loc, cn, ancla)}</div>
+      <p class="lectura">Por cada <b>100</b> constituidos en libros, el método
+         estatutario pediría <b>{100 + sobre:,.0f}</b>.</p>
+    </div>
+
+    <div class="der">
+      <table class="cifras">
+        <thead><tr><th>Reserva</th><th>En libros</th>
+          <th>Método estatutario</th><th>Diferencia</th></tr></thead>
+        <tbody>{filas}</tbody>
+      </table>
+      {html_serie}
+      {html_banda}
+    </div>
+  </main>
+
+  <footer class="pie">
+    <div><b>Qué es la diferencia</b>Lo que el Método Estatutario CNSF exigiría
+      constituir por encima de la Metodología local, que es la que está en libros.</div>
+    <div><b>Nota relevante</b>{esc(nota)}</div>
+    <div><b>Origen</b><span class="m">{esc(fuentes)}<br />
+      {ancla:,.4f} MXN/USD · Banxico al cierre<br />
+      armado en local {sello}</span></div>
+  </footer>
+</div>
+</body>
+</html>
+"""
+
+
+def escribir_posicion(hist: Historico, destino: "str | Path | None" = None,
+                      periodos: "Sequence[str] | None" = None,
+                      fx: float = FX_DEFAULT, nota: str = NOTA_RELEVANTE,
+                      abrir: bool = True) -> Path:
+    """Escribe la tarjeta de posición junto al notebook y la abre."""
+    ps = list(periodos) if periodos else hist.periodos()
+    ruta = (Path(destino) if destino
+            else Path(hist.ruta).parent / "posicion_reservas.html")
+    ruta.write_text(construir_html_posicion(hist, ps, fx, nota), encoding="utf-8")
+    if abrir:
+        try:
+            webbrowser.open_new_tab(ruta.resolve().as_uri())
+        except Exception:
+            pass
+    return ruta
+
+
+# -----------------------------------------------------------------------------
 # 8. La ventana
 # -----------------------------------------------------------------------------
 
@@ -3581,6 +3964,8 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
     btn_procesar.pack(side="right")
     btn_dir = ttk.Button(ctl, text="Vista dirección")
     btn_dir.pack(side="right", padx=(0, 6))
+    btn_pos = ttk.Button(ctl, text="Posición")
+    btn_pos.pack(side="right", padx=(0, 6))
     btn_evol = ttk.Button(ctl, text="Ver evolución")
     btn_evol.pack(side="right", padx=(0, 6))
     ttk.Button(ctl, text="Vaciar histórico",
@@ -4218,6 +4603,29 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
         apunta("· abierta en el navegador. El archivo es autocontenido: se puede mandar "
                "por correo tal cual.", "ok")
 
+    def posicion() -> None:
+        """La tarjeta de posición: el mes entero en una pantalla, sin bajar."""
+        fx = tipo_de_cambio()
+        funde_pendientes()
+        guarda_fx()
+        trae_tc(auto=True)
+        hist.guardar()
+        h, _ps = historico_de_la_vista()
+        ps = [p for p in h.periodos() if h.completo(p)]
+        if not ps:
+            apunta("! ningún corte tiene las dos fuentes cargadas: sin las dos no hay "
+                   "posición que mostrar.", "err")
+            return
+        try:
+            ruta_html = escribir_posicion(h, periodos=ps, fx=fx, nota=estado["nota"])
+        except Exception as err:
+            apunta(f"! no se pudo armar la tarjeta de posición: {err}", "err")
+            return
+        apunta(f"· tarjeta de posición al {etiqueta_corta(ps[-1]).lower()} escrita "
+               f"en {ruta_html}", "ok")
+        apunta("  una pantalla, sin bajar y sin nada que picar; al imprimirla cabe "
+               "en una A4 apaisada.")
+
     def direccion() -> None:
         """La hoja de una página para dirección: la brecha entre metodologías."""
         fx = tipo_de_cambio()
@@ -4279,6 +4687,7 @@ def abrir_ventana(hist_ruta: "str | Path" = HIST_JSON, bloquear: bool = True,
     btn_procesar.configure(command=procesar)
     btn_evol.configure(command=evolucion)
     btn_dir.configure(command=direccion)
+    btn_pos.configure(command=posicion)
     # el botón funde lo pendiente primero: si no, en frío no habría cortes que pedir
     btn_bmx.configure(command=lambda: (funde_pendientes(), guarda_fx(),
                                        hist.guardar(), trae_tc()))
